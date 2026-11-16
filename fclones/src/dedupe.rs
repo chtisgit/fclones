@@ -1599,7 +1599,7 @@ mod test {
                 let group = FileGroup {
                     file_len: FileLen(3),
                     file_hash: FileHash::from_str("00").unwrap(),
-                    files: paths.iter().map(|p| Path::from(p)).collect(),
+                    files: paths.iter().map(Path::from).collect(),
                 }
                 .map(|p| PathAndMetadata::new(p).unwrap());
                 let config = DedupeConfig {
