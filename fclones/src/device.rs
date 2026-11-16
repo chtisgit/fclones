@@ -154,6 +154,7 @@ impl DiskDevices {
     fn get_parallelism(
         name: &OsStr,
         disk_kind: DiskKind,
+        removable: bool,
         pool_sizes: &HashMap<OsString, Parallelism>,
     ) -> Parallelism {
         let mut dev_key = OsString::new();
@@ -162,11 +163,13 @@ impl DiskDevices {
         match pool_sizes.get(&dev_key) {
             Some(p) => *p,
             None => {
-                let p = match disk_kind {
+                // "removable" (documented for --threads) takes precedence over the disk kind
+                let removable_pool = removable.then(|| pool_sizes.get(OsStr::new("removable")));
+                let p = removable_pool.flatten().or(match disk_kind {
                     DiskKind::SSD => pool_sizes.get(OsStr::new("ssd")),
                     DiskKind::HDD => pool_sizes.get(OsStr::new("hdd")),
                     DiskKind::Unknown(_) => pool_sizes.get(OsStr::new("unknown")),
-                };
+                });
                 match p {
                     Some(p) => *p,
                     None => pool_sizes
@@ -184,6 +187,7 @@ impl DiskDevices {
         &mut self,
         name: OsString,
         disk_kind: DiskKind,
+        removable: bool,
         file_system: String,
         pool_sizes: &HashMap<OsString, Parallelism>,
     ) -> usize {
@@ -191,7 +195,7 @@ impl DiskDevices {
             index
         } else {
             let index = self.devices.len();
-            let parallelism = Self::get_parallelism(&name, disk_kind, pool_sizes);
+            let parallelism = Self::get_parallelism(&name, disk_kind, removable, pool_sizes);
             self.devices.push(DiskDevice::new(
                 index,
                 name,
@@ -207,7 +211,8 @@ impl DiskDevices {
     /// resides on. Otherwise, and on failures, it just returns the same `name`.
     #[cfg(target_os = "linux")]
     fn physical_device_name(name: &OsStr) -> OsString {
-        let regex = regex::Regex::new(r"^/dev/([fhs]d[a-z]|nvme[0-9]+).*").unwrap();
+        let regex =
+            regex::Regex::new(r"^/dev/((?:[fhsv]|xv)d[a-z]+|nvme[0-9]+|mmcblk[0-9]+).*").unwrap();
         let name_str = name.to_string_lossy();
         match regex.captures(name_str.as_ref()) {
             Some(captures) => {
@@ -237,6 +242,7 @@ impl DiskDevices {
         result.add_device(
             OsString::from("default"),
             DiskKind::Unknown(-1),
+            false,
             String::from("unknown"),
             pool_sizes,
         );
@@ -245,6 +251,7 @@ impl DiskDevices {
             let index = result.add_device(
                 device_name,
                 d.kind(),
+                d.is_removable(),
                 String::from_utf8_lossy(d.file_system()).to_string(),
                 pool_sizes,
             );
@@ -341,6 +348,23 @@ impl Index<usize> for DiskDevices {
 mod test {
     use super::*;
 
+    /// `--threads removable:N` was accepted but never used.
+    #[test]
+    fn removable_pool_size_is_used() {
+        let mut pool_sizes = HashMap::new();
+        let removable = Parallelism {
+            random: 3,
+            sequential: 2,
+        };
+        pool_sizes.insert(OsString::from("removable"), removable);
+        let p =
+            DiskDevices::get_parallelism(OsStr::new("/dev/sdz"), DiskKind::HDD, true, &pool_sizes);
+        assert_eq!((p.random, p.sequential), (3, 2));
+        let p =
+            DiskDevices::get_parallelism(OsStr::new("/dev/sdz"), DiskKind::HDD, false, &pool_sizes);
+        assert_eq!((p.random, p.sequential), (1, 1)); // HDD default
+    }
+
     /// Without any detected mount point (e.g. in some containers) this used to panic with an
     /// out-of-bounds index; the fallback was also the most nested mount, not a sensible one.
     #[test]
@@ -384,5 +408,17 @@ mod test {
             DiskDevices::physical_device_name(OsStr::new("/dev/unknown")),
             OsString::from("/dev/unknown")
         );
+        // multi-letter, virtio, Xen and MMC devices (used to be mapped wrongly or not at all)
+        for (partition, disk) in [
+            ("/dev/sdaa1", "/dev/sdaa"),
+            ("/dev/vda2", "/dev/vda"),
+            ("/dev/xvdb1", "/dev/xvdb"),
+            ("/dev/mmcblk0p1", "/dev/mmcblk0"),
+        ] {
+            assert_eq!(
+                DiskDevices::physical_device_name(OsStr::new(partition)),
+                OsString::from(disk)
+            );
+        }
     }
 }
