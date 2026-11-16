@@ -11,7 +11,6 @@ use nom::lib::std::fmt::Formatter;
 use serde::de::{Error, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use smallvec::SmallVec;
-use stfu8::DecodeError;
 
 use crate::arg;
 use crate::arg::{from_stfu8, to_stfu8};
@@ -209,8 +208,14 @@ impl Path {
     }
 
     /// Decodes the path from the string encoded with [`to_escaped_string`](Path::to_escaped_string).
-    pub fn from_escaped_string(encoded: &str) -> Result<Path, DecodeError> {
-        Ok(Path::from(from_stfu8(encoded)?))
+    /// Fails if the string is not valid STFU-8 or decodes to a path containing a NUL
+    /// character (which no file system allows and which `Path` cannot represent).
+    pub fn from_escaped_string(encoded: &str) -> Result<Path, String> {
+        let decoded = from_stfu8(encoded).map_err(|e| e.to_string())?;
+        if decoded.to_string_lossy().contains('\0') {
+            return Err("path contains a NUL character".to_string());
+        }
+        Ok(Path::from(decoded))
     }
 
     /// Formats the path in a way that Posix-shell can decode it.
@@ -488,6 +493,13 @@ mod test {
         assert!(!Path::from("foo/bar").is_absolute());
         assert!(!Path::from("./foo/bar").is_absolute());
         assert!(!Path::from("../foo/bar").is_absolute());
+    }
+
+    /// A NUL in a decoded report path used to panic when the path was built.
+    #[test]
+    fn from_escaped_string_rejects_nul() {
+        assert!(Path::from_escaped_string("/a\\x00b").is_err());
+        assert!(Path::from_escaped_string("/a\\x01b").is_ok());
     }
 
     #[test]
