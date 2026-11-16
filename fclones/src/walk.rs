@@ -307,6 +307,9 @@ impl<'a> Walk<'a> {
                     return;
                 }
             }
+            if has_hidden_attribute(&entry.path) {
+                return;
+            }
         }
 
         // Skip already visited paths. We're checking only when follow_links is true,
@@ -519,6 +522,21 @@ impl<'a> Walk<'a> {
     }
 }
 
+/// Returns true if the file has the Windows `Hidden` attribute (upstream issue #298).
+#[cfg(windows)]
+fn has_hidden_attribute(path: &Path) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+    symlink_metadata(path.to_path_buf())
+        .map(|m| m.file_attributes() & FILE_ATTRIBUTE_HIDDEN != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(windows))]
+fn has_hidden_attribute(_path: &Path) -> bool {
+    false
+}
+
 impl Default for Walk<'_> {
     fn default() -> Self {
         Self::new()
@@ -567,6 +585,34 @@ mod test {
             assert_eq!(walk_with_depth(1), files[..1].to_vec());
             assert_eq!(walk_with_depth(2), files[..2].to_vec());
             assert_eq!(walk_with_depth(usize::MAX), files.to_vec());
+        });
+    }
+
+    /// On Windows, files with the Hidden attribute are hidden files too (upstream issue #298).
+    #[test]
+    #[cfg(windows)]
+    fn windows_hidden_attribute_is_respected() {
+        with_dir("target/test/walk/hidden_attribute/", |test_root| {
+            let visible = test_root.join("visible");
+            let hidden = test_root.join("hidden");
+            File::create(&visible).unwrap();
+            File::create(&hidden).unwrap();
+            let status = std::process::Command::new("attrib")
+                .arg("+h")
+                .arg(&hidden)
+                .status()
+                .unwrap();
+            assert!(status.success());
+            let names = |walk: Walk| -> Vec<String> {
+                run_walk(walk, test_root.clone())
+                    .iter()
+                    .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+                    .collect()
+            };
+            assert_eq!(names(Walk::new()), vec!["visible"]);
+            let mut walk = Walk::new();
+            walk.hidden = true;
+            assert_eq!(names(walk), vec!["hidden", "visible"]);
         });
     }
 
