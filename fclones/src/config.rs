@@ -375,7 +375,8 @@ pub struct GroupConfig {
 
 impl GroupConfig {
     fn validate(&self) -> Result<(), String> {
-        if self.isolate && self.paths.len() <= self.rf_over() {
+        // With --stdin the input paths are only known while scanning, so they cannot be counted.
+        if self.isolate && !self.stdin && self.paths.len() <= self.rf_over() {
             return Err(format!(
                 "The --isolate flag requires that the number of input paths ({}) \
                  is at least as large as the replication factor lower bound ({}). \
@@ -385,6 +386,7 @@ impl GroupConfig {
             ));
         }
         if self.isolate
+            && !self.stdin
             && (self.rf_under.is_some() || self.unique)
             && self.paths.len() < self.rf_under()
         {
@@ -845,6 +847,16 @@ mod test {
     fn test_remove_command() {
         let config: Config = Config::try_parse_from(vec!["fclones", "remove"]).unwrap();
         assert_matches!(config.command, Command::Remove { .. });
+    }
+
+    /// --isolate with --stdin was always rejected: the validation counted only positional paths.
+    #[test]
+    fn test_isolate_with_stdin_is_accepted() {
+        let config =
+            Config::try_parse_from(vec!["fclones", "group", "--stdin", "--isolate"]).unwrap();
+        assert!(config.command.validate().is_ok());
+        let config = Config::try_parse_from(vec!["fclones", "group", "--isolate", "a"]).unwrap();
+        assert!(config.command.validate().is_err());
     }
 
     /// `-n` / `--rf-over` of the dedupe commands used to panic in clap

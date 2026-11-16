@@ -112,6 +112,20 @@ fn configure_main_thread_pool(pool_sizes: &HashMap<OsString, Parallelism>) {
 
 fn run_group(mut config: GroupConfig, log: &dyn Log) -> Result<(), Error> {
     config.resolve_base_dir().map_err(|e| e.to_string())?;
+    if config.stdin && config.isolate {
+        // --isolate needs the input paths twice (as roots and for scanning), but the standard
+        // input can be read only once, so read the list up front.
+        config.paths = config.input_paths().collect();
+        config.stdin = false;
+        if config.paths.len() <= config.rf_over() {
+            return Err(Error::from(format!(
+                "The --isolate flag requires that the number of input paths ({}) \
+                 is at least as large as the replication factor lower bound ({}).",
+                config.paths.len(),
+                config.rf_over() + 1
+            )));
+        }
+    }
     check_input_paths_exist(&config, log)?;
     check_can_create_output_file(&config)?;
     configure_main_thread_pool(&config.thread_pool_sizes());
@@ -168,6 +182,14 @@ pub fn run_dedupe(op: DedupeOp, config: DedupeConfig, log: &dyn Log) -> Result<(
 
         if dedupe_config.rf_over.is_none() {
             dedupe_config.rf_over = Some(c.reported_rf_over())
+        }
+        if dedupe_config.isolated_roots.is_empty() && c.isolate && c.stdin {
+            // The input paths were read from the standard input of the group command and are
+            // not in the report; reading them now would consume the report itself.
+            return Err(Error::from(
+                "The report was created with --stdin --isolate, so the isolated roots are unknown. \
+                 Please pass them with --isolate.",
+            ));
         }
         if dedupe_config.isolated_roots.is_empty() && c.isolate {
             dedupe_config.isolated_roots = c.input_paths().collect();
