@@ -398,7 +398,7 @@ impl<'a> Walk<'a> {
 
         match fs::read_dir(path.to_path_buf()) {
             Ok(rd) => {
-                for entry in Self::sorted_entries(path, rd) {
+                for entry in self.sorted_entries(path, rd) {
                     let gitignore = gitignore.clone();
                     scope.spawn(move |s| {
                         self.visit_entry(entry, dev, s, level + 1, gitignore, state)
@@ -424,17 +424,39 @@ impl<'a> Walk<'a> {
     /// Sorts dir entries so that regular files are at the end.
     /// Because each worker's queue is a LIFO, the files would be picked up first and the
     /// dirs would be on the other side, amenable for stealing by other workers.
-    fn sorted_entries(parent: Path, rd: ReadDir) -> impl Iterator<Item = Entry> {
+    fn sorted_entries(&self, parent: Path, rd: ReadDir) -> impl Iterator<Item = Entry> {
         let mut files = vec![];
         let mut links = vec![];
         let mut dirs = vec![];
         let path = Arc::new(parent);
-        let mut entries: Vec<DirEntry> = rd.filter_map(|e| e.ok()).collect();
+        let mut entries: Vec<DirEntry> = rd
+            .filter_map(|e| {
+                e.map_err(|e| {
+                    self.log_warn(format!(
+                        "Failed to read dir entry in {}: {}",
+                        path.display(),
+                        e
+                    ))
+                })
+                .ok()
+            })
+            .collect();
         // Accessing entries in the order of identifiers should be faster on rotational drives
         Self::sort_dir_entries_by_inode(&mut entries);
         entries
             .into_iter()
-            .filter_map(|e| Entry::from_dir_entry(&path, e).ok())
+            .filter_map(|e| {
+                let name = e.file_name();
+                Entry::from_dir_entry(&path, e)
+                    .map_err(|err| {
+                        self.log_warn(format!(
+                            "Failed to read file type of {}: {}",
+                            path.join(Path::from(name)).display(),
+                            err
+                        ))
+                    })
+                    .ok()
+            })
             .for_each(|e| match e.tpe {
                 EntryType::File => files.push(e),
                 EntryType::SymLink => links.push(e),
