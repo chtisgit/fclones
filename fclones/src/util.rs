@@ -108,7 +108,8 @@ pub mod test {
         remove_dir_all(&test_root).ok();
         create_dir_all(&test_root).unwrap();
 
-        let ret = test_code(&test_root.canonicalize().unwrap());
+        // dunce: like fclones itself, avoid the \\?\ prefix std::fs::canonicalize adds on Windows
+        let ret = test_code(&dunce::canonicalize(&test_root).unwrap());
 
         remove_dir_all(&test_root).ok();
         ret
