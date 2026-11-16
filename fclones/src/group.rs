@@ -3,7 +3,7 @@
 use std::cell::RefCell;
 use std::cmp::{max, min, Reverse};
 use std::collections::BTreeMap;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env::{args_os, current_dir};
 use std::ffi::{OsStr, OsString};
 use std::fmt::Debug;
@@ -401,8 +401,9 @@ impl<F: AsRef<Path> + AsRef<FileId>> FileGroup<F> {
             Replication::Underreplicated(_) => 0,
             Replication::Overreplicated(rf) => {
                 let rf = max(rf, 1);
-                if filter.root_paths.is_empty() {
+                if filter.root_paths.is_empty() && !filter.group_by_id {
                     // fast-path, equivalent to the code in the else branch, but way faster
+                    // (with group_by_id, hard links form one subgroup, so it is not equivalent)
                     self.file_count().saturating_sub(rf)
                 } else {
                     let sub_groups =
@@ -414,6 +415,32 @@ impl<F: AsRef<Path> + AsRef<FileId>> FileGroup<F> {
                     let cutoff_index = min(rf, sub_group_lengths.len());
                     sub_group_lengths[cutoff_index..].iter().sum()
                 }
+            }
+        }
+    }
+
+    /// Returns how much space the redundant files take up, i.e. could be reclaimed.
+    ///
+    /// Unlike `file_len * redundant_count()`, data shared by hard links is counted once, and
+    /// not at all if the same data is also reachable from a file that would be kept.
+    pub fn redundant_size(&self, filter: &FileGroupFilter) -> FileLen {
+        match filter.replication {
+            Replication::Underreplicated(_) => FileLen(0),
+            Replication::Overreplicated(rf) => {
+                let sub_groups =
+                    FileSubGroup::group(&self.files, &filter.root_paths, filter.group_by_id);
+                let cutoff_index = min(max(rf, 1), sub_groups.len());
+                let id = |f: &&F| -> FileId { *(*f).as_ref() };
+                let kept: HashSet<FileId> = sub_groups[..cutoff_index]
+                    .iter()
+                    .flat_map(|sg| sg.files.iter().map(id))
+                    .collect();
+                let redundant: HashSet<FileId> = sub_groups[cutoff_index..]
+                    .iter()
+                    .flat_map(|sg| sg.files.iter().map(id))
+                    .filter(|i| !kept.contains(i))
+                    .collect();
+                self.file_len * redundant.len() as u64
             }
         }
     }
@@ -1310,7 +1337,7 @@ pub fn write_report(config: &GroupConfig, log: &dyn Log, grouped: &GroupedFiles)
 
     let (redundant_count, redundant_size) = groups.iter().fold((0, FileLen(0)), |res, g| {
         let count = g.redundant_count(&report_filter);
-        (res.0 + count, res.1 + g.file_len * count as u64)
+        (res.0 + count, res.1 + g.redundant_size(&report_filter))
     });
     let (missing_count, missing_size) = groups.iter().fold((0, FileLen(0)), |res, g| {
         let count = g.missing_count(&report_filter);
@@ -1999,6 +2026,36 @@ mod test {
             let results = group_files(&config, &log).unwrap().groups;
             assert_eq!(results.len(), 1);
             assert_eq!(results[0].paths(), vec![Path::from(&unique)]);
+        })
+    }
+
+    /// Hard links of a redundant file take up space only once: 3 links + 1 copy of 10 bytes
+    /// are 10 redundant bytes, whichever subgroup comes first.
+    #[test]
+    #[cfg(unix)]
+    fn redundant_size_counts_hard_linked_data_once() {
+        with_dir("main/redundant_size_hard_links", |root| {
+            let h1 = root.join("a_h1");
+            let copy = root.join("b_copy");
+            write_test_file(&h1, b"0123456789", b"", b"");
+            hard_link(&h1, root.join("a_h2")).unwrap();
+            hard_link(&h1, root.join("a_h3")).unwrap();
+            write_test_file(&copy, b"0123456789", b"", b"");
+
+            let log = test_log();
+            let config = GroupConfig {
+                paths: vec![root.into()],
+                ..GroupConfig::default()
+            };
+            let results = group_files(&config, &log).unwrap().groups;
+            assert_eq!(results.len(), 1);
+            let filter = config.report_filter();
+            assert_eq!(results[0].redundant_size(&filter), FileLen(10));
+
+            // and with the copy listed first, the three links are redundant: still 10 bytes
+            let mut group = results[0].clone();
+            group.files.reverse();
+            assert_eq!(group.redundant_size(&filter), FileLen(10));
         })
     }
 

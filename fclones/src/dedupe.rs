@@ -365,7 +365,19 @@ impl FsCommand {
         }
     }
 
-    /// Returns how much disk space running this command would reclaim
+    /// Returns the file that is removed, moved or replaced by a link.
+    pub fn dropped_file(&self) -> &PathAndMetadata {
+        match self {
+            FsCommand::Remove { file, .. }
+            | FsCommand::SoftLink { link: file, .. }
+            | FsCommand::HardLink { link: file, .. }
+            | FsCommand::RefLink { link: file, .. }
+            | FsCommand::Move { source: file, .. } => file,
+        }
+    }
+
+    /// Returns the size of the file affected by this command. Note that this space is only
+    /// reclaimed if no other hard link to the file remains.
     pub fn space_to_reclaim(&self) -> FileLen {
         match self {
             FsCommand::Remove { file, .. }
@@ -1020,18 +1032,77 @@ where
     script
         .into_par_iter()
         .flat_map(|(_, cmd_vec)| cmd_vec)
-        .map(|cmd| cmd.execute(should_lock, ignore_xattr_errors, log))
-        .inspect(|res| {
-            if let Err(e) = res {
-                log.warn(e);
-            }
-        })
-        .filter_map(|res| res.ok())
-        .map(|len| DedupeResult {
-            processed_count: 1,
-            reclaimed_space: len,
-        })
-        .reduce(DedupeResult::default, |a, b| a + b)
+        .filter_map(
+            |cmd| match cmd.execute(should_lock, ignore_xattr_errors, log) {
+                Ok(_) => Some(ReclaimedSpace::from_file(cmd.dropped_file())),
+                Err(e) => {
+                    log.warn(e);
+                    None
+                }
+            },
+        )
+        .reduce(ReclaimedSpace::default, ReclaimedSpace::merge)
+        .into_result()
+}
+
+/// Accumulates the processed files and the disk space freed by processing them.
+///
+/// Data of a file with several hard links is freed only if all of its links are removed or
+/// replaced, and then only once, so the space is counted per inode and only if the number of
+/// processed links equals the link count of the inode.
+#[derive(Default)]
+struct ReclaimedSpace {
+    processed_count: u64,
+    inodes: HashMap<FileId, (u64, u64, FileLen)>, // id -> (processed links, link count, len)
+}
+
+impl ReclaimedSpace {
+    fn from_file(file: &PathAndMetadata) -> ReclaimedSpace {
+        let mut result = ReclaimedSpace::default();
+        result.add(file);
+        result
+    }
+
+    fn add(&mut self, file: &PathAndMetadata) {
+        self.processed_count += 1;
+        let entry = self.inodes.entry(file.metadata.file_id()).or_insert((
+            0,
+            link_count(&file.metadata),
+            file.metadata.len(),
+        ));
+        entry.0 += 1;
+    }
+
+    fn merge(mut self, other: ReclaimedSpace) -> ReclaimedSpace {
+        self.processed_count += other.processed_count;
+        for (id, (count, nlink, len)) in other.inodes {
+            self.inodes.entry(id).or_insert((0, nlink, len)).0 += count;
+        }
+        self
+    }
+
+    fn into_result(self) -> DedupeResult {
+        DedupeResult {
+            processed_count: self.processed_count,
+            reclaimed_space: self
+                .inodes
+                .values()
+                .filter(|(count, nlink, _)| count >= nlink)
+                .map(|(_, _, len)| *len)
+                .sum(),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn link_count(metadata: &FileMetadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    metadata.nlink()
+}
+
+#[cfg(not(unix))]
+fn link_count(_metadata: &FileMetadata) -> u64 {
+    1
 }
 
 /// We need this so we can put command vectors in a priority queue.
@@ -1093,8 +1164,7 @@ pub fn log_script(
 
         let mut queue = PriorityQueue::new();
         let mut next_group_index = 0;
-        let mut processed_count = 0;
-        let mut reclaimed_space = FileLen(0);
+        let mut reclaimed = ReclaimedSpace::default();
 
         while let Ok((group_index, commands)) = rx.recv() {
             // Push the command group we received from the iterator.
@@ -1116,8 +1186,7 @@ pub fn log_script(
                 next_group_index += 1;
                 let cmd_vec = queue.pop().unwrap().0.commands;
                 for cmd in cmd_vec {
-                    processed_count += 1;
-                    reclaimed_space += cmd.space_to_reclaim();
+                    reclaimed.add(cmd.dropped_file());
                     for line in cmd.to_shell_str() {
                         writeln!(out, "{line}")?;
                     }
@@ -1125,10 +1194,7 @@ pub fn log_script(
             }
         }
 
-        Ok(DedupeResult {
-            processed_count,
-            reclaimed_space,
-        })
+        Ok(reclaimed.into_result())
     })
     .unwrap()
 }
@@ -1685,6 +1751,48 @@ mod test {
             assert!(out_lines[4].contains("group_3"));
             assert!(out_lines[5].contains("group_3"));
         });
+    }
+
+    /// Space is freed only when all hard links of a file are removed, and then only once.
+    #[test]
+    #[cfg(unix)]
+    fn test_reclaimed_space_counts_hard_linked_data_once() {
+        with_dir("dedupe/reclaimed_hard_links", |root| {
+            let log = StdLog::new();
+            let h1 = root.join("h1");
+            let h2 = root.join("h2");
+            let h3 = root.join("h3");
+            let outside = root.join("outside");
+            write_file(&h1, "0123456789");
+            fs::hard_link(&h1, &h2).unwrap();
+            fs::hard_link(&h1, &h3).unwrap();
+            let remove = |paths: &[&PathBuf]| -> Vec<(usize, Vec<FsCommand>)> {
+                let cmds = paths
+                    .iter()
+                    .map(|p| FsCommand::Remove {
+                        file: PathAndMetadata::new(Path::from(*p)).unwrap(),
+                    })
+                    .collect();
+                vec![(0, cmds)]
+            };
+
+            // two of three links: nothing is freed
+            let result = log_script(remove(&[&h2, &h3]), Vec::new()).unwrap();
+            assert_eq!(result.processed_count, 2);
+            assert_eq!(result.reclaimed_space, FileLen(0));
+            // all three links: the data is freed once
+            let result = log_script(remove(&[&h1, &h2, &h3]), Vec::new()).unwrap();
+            assert_eq!(result.reclaimed_space, FileLen(10));
+            let result = run_script(remove(&[&h1, &h2, &h3]), false, false, &log);
+            assert_eq!(result.processed_count, 3);
+            assert_eq!(result.reclaimed_space, FileLen(10));
+
+            // a file with a link outside the script frees nothing
+            write_file(&h1, "0123456789");
+            fs::hard_link(&h1, &outside).unwrap();
+            let result = run_script(remove(&[&h1]), false, false, &log);
+            assert_eq!(result.reclaimed_space, FileLen(0));
+        })
     }
 
     #[test]
