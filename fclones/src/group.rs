@@ -1073,10 +1073,15 @@ fn group_by_prefix(
         FileAccess::Random,
         |(fi, _)| {
             progress.inc(1);
+            // Files longer than the prefix get the (smaller) minimum prefix of their device, but
+            // never more than the prefix size configured with --max-prefix-size.
             let prefix_len = if fi.len <= prefix_len {
                 prefix_len
             } else {
-                ctx.devices[fi.get_device_index()].min_prefix_len()
+                min(
+                    prefix_len,
+                    ctx.devices[fi.get_device_index()].min_prefix_len(),
+                )
             };
             let chunk = FileChunk::new(&fi.path, FilePos(0), prefix_len);
             ctx.hasher.hash_file_or_log_err(&chunk, |_| {})
@@ -2002,6 +2007,31 @@ mod test {
             let results = group_files(&config, &log).unwrap().groups;
             assert_eq!(results.len(), 1);
             assert_eq!(results[0].files.len(), 2);
+        })
+    }
+
+    /// --max-prefix-size below the device minimum (4 KiB) used to be ignored for files longer
+    /// than the prefix. With a 1000 byte prefix and no content hash, files differing only after
+    /// byte 1000 are grouped - proof that only 1000 bytes were compared.
+    #[test]
+    fn max_prefix_size_below_device_minimum_is_honored() {
+        with_dir("main/max_prefix_size_small", |root| {
+            let file1 = root.join("file1");
+            let file2 = root.join("file2");
+            let mut data = vec![b'a'; 10_000];
+            std::fs::write(&file1, &data).unwrap();
+            data[2000] = b'b';
+            std::fs::write(&file2, &data).unwrap();
+
+            let log = test_log();
+            let config = GroupConfig {
+                paths: vec![file1.into(), file2.into()],
+                max_prefix_size: Some(FileLen(1000)),
+                max_suffix_size: Some(FileLen(1000)),
+                skip_content_hash: true,
+                ..GroupConfig::default()
+            };
+            assert_eq!(group_files(&config, &log).unwrap().groups.len(), 1);
         })
     }
 
