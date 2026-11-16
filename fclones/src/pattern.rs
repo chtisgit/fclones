@@ -15,6 +15,10 @@ use crate::path::PATH_ESCAPE_CHAR;
 use crate::regex::Regex;
 use std::str::FromStr;
 
+/// Placeholder emitted for `!(...)`, which cannot be translated to a regex. It contains a NUL
+/// character, which cannot occur in a glob given on the command line.
+const NEGATION_MARKER: &str = "\u{0}!(\u{0}";
+
 #[derive(Debug)]
 pub struct PatternError {
     pub cause: String,
@@ -137,7 +141,7 @@ impl Pattern {
     /// - `?(a|b)`: matches at most one occurrence of the pattern inside the brackets
     /// - `+(a|b)`: matches at least occurrence of the patterns given inside the brackets
     /// - `*(a|b)`: matches any number of occurrences of the patterns given inside the brackets
-    /// - `!(a|b)`: matches anything that doesn't match any of the patterns given inside the brackets
+    /// - `!(a|b)`: not supported (returns an error); use an exclude pattern instead
     ///
     /// Use `\` to escape the special symbols that need to be matched literally. E.g. `\*` matches
     /// a single `*` character.
@@ -145,6 +149,11 @@ impl Pattern {
     pub fn glob_with(glob: &str, opts: &PatternOpts) -> Result<Pattern, PatternError> {
         let result: IResult<&str, String> = Self::glob_to_regex(Scope::TopLevel, glob);
         match result {
+            Ok(("", regex)) if regex.contains(NEGATION_MARKER) => Err(PatternError {
+                input: glob.to_string(),
+                cause: "negated patterns !(...) are not supported; use --exclude instead"
+                    .to_string(),
+            }),
             Ok(("", regex)) => Self::regex_with(regex.as_str(), opts),
             Ok((remaining, _)) => Err(PatternError {
                 input: glob.to_string(),
@@ -225,8 +234,9 @@ impl Pattern {
         let p_ext_exactly_once = map(tuple((tag("@"), p_ext_glob)), |(_, g)| {
             mk_string(g, "(", "|", ")")
         });
-        let p_ext_never = map(tuple((tag("!"), p_ext_glob)), |(_, g)| {
-            mk_string(g, "(?!", "|", ")")
+        // `!(a|b)` cannot be expressed with the regex engine (no look-around), see glob_with.
+        let p_ext_never = map(tuple((tag("!"), p_ext_glob)), |_| {
+            NEGATION_MARKER.to_string()
         });
 
         // ** -> .*
@@ -554,6 +564,15 @@ mod test {
         assert!(g1.matches_prefix(native_dir_sep("/a/b/c").as_str()));
         assert!(g1.matches_prefix(native_dir_sep("/a/b/z/foo").as_str()));
         assert!(!g1.matches_prefix(native_dir_sep("/a/c/z/foo").as_str()));
+    }
+
+    /// `!(...)` used to compile to a look-ahead, which the regex engine rejects with a
+    /// confusing "look-around is not supported" error. It is reported clearly now.
+    #[test]
+    fn negated_extglob_is_rejected_clearly() {
+        let err = Pattern::glob("*.!(jpg)").unwrap_err();
+        assert!(err.cause.contains("not supported"), "{err}");
+        assert!(Pattern::glob("*.@(jpg|png)").is_ok());
     }
 
     /// Anchoring must apply to every alternative: `^a|b$` would mean "starts with a or ends
