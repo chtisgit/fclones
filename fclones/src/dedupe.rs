@@ -432,6 +432,10 @@ impl FsCommand {
                 use_rename,
             } => {
                 let source = source.path.quote();
+                // fclones creates the target directory, so must the script
+                if let Some(parent) = target.parent() {
+                    result.push(format!("mkdir -p {}", parent.quote()));
+                }
                 let target = target.quote();
                 if *use_rename {
                     result.push(format!("mv {} {}", &source, &target));
@@ -457,7 +461,8 @@ impl FsCommand {
                 let target = target.path.quote();
                 let link = link.path.quote();
                 result.push(format!("move {} {}", link, tmp.quote()));
-                result.push(format!("mklink {} {}", target, link));
+                // mklink [/H] <link> <target>
+                result.push(format!("mklink {} {}", link, target));
                 result.push(format!("del {}", tmp.quote()));
             }
             FsCommand::HardLink { target, link, .. } => {
@@ -465,7 +470,7 @@ impl FsCommand {
                 let target = target.path.quote();
                 let link = link.path.quote();
                 result.push(format!("move {} {}", link, tmp.quote()));
-                result.push(format!("mklink /H {} {}", target, link));
+                result.push(format!("mklink /H {} {}", link, target));
                 result.push(format!("del {}", tmp.quote()));
             }
             FsCommand::RefLink { target, link, .. } => {
@@ -477,6 +482,11 @@ impl FsCommand {
                 use_rename,
             } => {
                 let source = source.path.quote();
+                // fclones creates the target directory, so must the script
+                // (cmd.exe mkdir creates intermediate directories)
+                if let Some(parent) = target.parent() {
+                    result.push(format!("if not exist {0} mkdir {0}", parent.quote()));
+                }
                 let target = target.quote();
                 if *use_rename {
                     result.push(format!("move {} {}", &source, &target));
@@ -1716,6 +1726,55 @@ mod test {
             assert!(!root.join("file_2").exists());
             assert!(root.join("file_3").exists());
         });
+    }
+
+    /// The printed move script must work like the real move: it has to create the target
+    /// directory first.
+    #[test]
+    #[cfg(unix)]
+    fn test_move_script_creates_target_dir() {
+        with_dir("dedupe/move_script", |root| {
+            let file_path = root.join("file");
+            write_file(&file_path, "content");
+            let target = Path::from(root.join("attic/deep/dir/file"));
+            let cmd = FsCommand::Move {
+                source: PathAndMetadata::new(Path::from(&file_path)).unwrap(),
+                target: target.clone(),
+                use_rename: true,
+            };
+            let script = cmd.to_shell_str().join("\n");
+            assert!(script.starts_with("mkdir -p "), "{script}");
+            let status = std::process::Command::new("sh")
+                .args(["-e", "-c", &script])
+                .status()
+                .unwrap();
+            assert!(status.success(), "{script}");
+            assert!(!file_path.exists());
+            assert_eq!(read_file(&target.to_path_buf()), "content");
+        })
+    }
+
+    /// `mklink [/H] <link> <target>`: the arguments were in the wrong order (upstream #367).
+    #[test]
+    #[cfg(windows)]
+    fn test_windows_link_script_argument_order() {
+        with_dir("dedupe/mklink_script", |root| {
+            let target_path = root.join("target");
+            let link_path = root.join("link");
+            write_file(&target_path, "content");
+            write_file(&link_path, "content");
+            let target = Arc::new(PathAndMetadata::new(Path::from(&target_path)).unwrap());
+            let link = PathAndMetadata::new(Path::from(&link_path)).unwrap();
+            let expected = format!("{} {}", link.path.quote(), target.path.quote());
+            let soft = FsCommand::SoftLink {
+                target: target.clone(),
+                link: link.clone(),
+            }
+            .to_shell_str();
+            let hard = FsCommand::HardLink { target, link }.to_shell_str();
+            assert_eq!(soft[1], format!("mklink {expected}"));
+            assert_eq!(hard[1], format!("mklink /H {expected}"));
+        })
     }
 
     #[test]
