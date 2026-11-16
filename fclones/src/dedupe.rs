@@ -317,22 +317,22 @@ impl FsCommand {
     ) -> io::Result<FileLen> {
         match self {
             FsCommand::Remove { file } => {
-                let _ = Self::maybe_lock(&file.path, should_lock)?;
+                let _lock = Self::maybe_lock(&file.path, should_lock)?;
                 Self::remove(&file.path)?;
                 Ok(file.metadata.len())
             }
             FsCommand::SoftLink { target, link } => {
-                let _ = Self::maybe_lock(&link.path, should_lock)?;
+                let _lock = Self::maybe_lock(&link.path, should_lock)?;
                 Self::safe_remove(&link.path, |link| Self::symlink(&target.path, link), log)?;
                 Ok(link.metadata.len())
             }
             FsCommand::HardLink { target, link } => {
-                let _ = Self::maybe_lock(&link.path, should_lock)?;
+                let _lock = Self::maybe_lock(&link.path, should_lock)?;
                 Self::safe_remove(&link.path, |link| Self::hardlink(&target.path, link), log)?;
                 Ok(link.metadata.len())
             }
             FsCommand::RefLink { target, link } => {
-                let _ = Self::maybe_lock(&link.path, should_lock)?;
+                let _lock = Self::maybe_lock(&link.path, should_lock)?;
                 crate::reflink::reflink(target, link, ignore_xattr_errors, log)?;
                 Ok(link.metadata.len())
             }
@@ -341,7 +341,7 @@ impl FsCommand {
                 target,
                 use_rename,
             } => {
-                let _ = Self::maybe_lock(&source.path, should_lock);
+                let _lock = Self::maybe_lock(&source.path, should_lock)?;
                 let len = source.metadata.len();
                 if *use_rename && Self::move_rename(&source.path, target).is_ok() {
                     return Ok(len);
@@ -1129,6 +1129,48 @@ mod test {
             let cmd = FsCommand::Remove { file };
             cmd.execute(true, false, &log).unwrap();
             assert!(!file_path.exists())
+        })
+    }
+
+    /// Locking must not prevent removing or linking read-only files: those operations need
+    /// write access to the directory only.
+    #[test]
+    #[cfg(unix)]
+    fn test_commands_work_on_read_only_files_with_locking() {
+        use std::os::unix::fs::PermissionsExt;
+        if unsafe { libc::geteuid() } == 0 {
+            return; // root can open read-only files for writing anyway
+        }
+        with_dir("dedupe/read_only_lock", |root| {
+            let log = StdLog::new();
+            let read_only = |p: &PathBuf| {
+                fs::set_permissions(p, fs::Permissions::from_mode(0o444)).unwrap();
+            };
+
+            let file_path = root.join("file");
+            write_file(&file_path, "content");
+            read_only(&file_path);
+            let file = PathAndMetadata::new(Path::from(&file_path)).unwrap();
+            FsCommand::Remove { file }
+                .execute(true, false, &log)
+                .unwrap();
+            assert!(!file_path.exists());
+
+            let target_path = root.join("target");
+            let link_path = root.join("link");
+            write_file(&target_path, "content");
+            write_file(&link_path, "content");
+            read_only(&link_path);
+            FsCommand::HardLink {
+                target: Arc::new(PathAndMetadata::new(Path::from(&target_path)).unwrap()),
+                link: PathAndMetadata::new(Path::from(&link_path)).unwrap(),
+            }
+            .execute(true, false, &log)
+            .unwrap();
+            assert_eq!(
+                FileId::new(&Path::from(&link_path)).unwrap(),
+                FileId::new(&Path::from(&target_path)).unwrap()
+            );
         })
     }
 
