@@ -126,9 +126,9 @@ pub fn from_stfu8(encoded: &str) -> Result<OsString, DecodeError> {
     Ok(OsString::from_wide(&raw_bytes))
 }
 
-const SPECIAL_CHARS: [char; 25] = [
+const SPECIAL_CHARS: [char; 26] = [
     '|', '&', ';', '<', '>', '(', ')', '{', '}', '$', '`', '\\', '\'', '"', ' ', '\t', '*', '?',
-    '+', '[', ']', '#', '˜', '=', '%',
+    '+', '[', ']', '#', '~', '=', '%', '!',
 ];
 
 /// Escapes special characters in a string, so that it will retain its literal meaning when used as
@@ -414,6 +414,14 @@ mod test {
         assert_eq!(quote(OsString::from("$ab")), "'$ab'");
         assert_eq!(quote(OsString::from("a(b)")), "'a(b)'");
         assert_eq!(quote(OsString::from("a\\b")), "'a\\b'");
+    }
+
+    /// `~` (tilde expansion) and `!` (history expansion) must be quoted; the list contained
+    /// U+02DC instead of `~` (upstream issue #366).
+    #[test]
+    fn quote_tilde_and_exclamation_mark() {
+        assert_eq!(quote(OsString::from("~foo")), "'~foo'");
+        assert_eq!(quote(OsString::from("a!b")), "'a!b'");
     }
 
     #[test]
