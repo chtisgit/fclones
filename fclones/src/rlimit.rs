@@ -38,14 +38,33 @@ fn rlimit_nofile() -> libc::rlim_t {
 // stdin, stdout, stderr, plus two as a buffer
 const OTHER_OPEN_FILES: isize = 3 + 2;
 
+/// Number of files that may be open at the same time for the given RLIMIT_NOFILE value.
+/// The limit can be RLIM_INFINITY (u64::MAX), which must not wrap to a negative number.
+#[cfg(unix)]
+fn open_files_permits(limit: libc::rlim_t) -> isize {
+    let limit = std::cmp::min(limit, i32::MAX as libc::rlim_t) as isize;
+    std::cmp::max(limit - OTHER_OPEN_FILES, 64 /* fallback value */)
+}
+
+#[cfg(all(test, unix))]
+mod test {
+    #[test]
+    fn open_files_permits() {
+        assert_eq!(
+            super::open_files_permits(1024),
+            1024 - super::OTHER_OPEN_FILES
+        );
+        assert_eq!(super::open_files_permits(10), 64);
+        assert!(super::open_files_permits(libc::RLIM_INFINITY) > 1_000_000);
+    }
+}
+
 #[cfg(unix)]
 lazy_static! {
     // Globally track the number of opened files so many parallel operations do not raise
     // "Too many open files (os error 24)".
-    pub static ref RLIMIT_OPEN_FILES: Arc<Semaphore> = Arc::new(Semaphore::new(std::cmp::max(
-        rlimit_nofile() as isize - OTHER_OPEN_FILES,
-        64 // fallback value
-    )));
+    pub static ref RLIMIT_OPEN_FILES: Arc<Semaphore> =
+        Arc::new(Semaphore::new(open_files_permits(rlimit_nofile())));
 }
 
 #[cfg(not(unix))]
