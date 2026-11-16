@@ -107,7 +107,8 @@ impl Drop for Output {
 /// Transforms files through an external program.
 /// The `command_str` field contains a path to a program and its space separated arguments.
 /// The command takes a file given in the `$IN` variable and produces an `$OUT` file.
-#[derive(Clone)]
+/// Not `Clone`: dropping a `Transform` removes its temporary directory, so a dropped clone
+/// would delete the directory still used by the original.
 pub struct Transform {
     /// a path to a program and its space separated arguments
     pub command_str: String,
