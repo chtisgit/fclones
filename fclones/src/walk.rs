@@ -84,27 +84,44 @@ impl IgnoreStack {
     /// If .gitignore file exists in given dir, creates a `Gitignore` struct for it
     /// and returns the stack with the new `Gitignore` appended. Otherwise returns a cloned self.
     pub fn push(&self, dir: &Path, log: Option<&dyn Log>) -> IgnoreStack {
-        let mut path = Arc::new(dir.clone()).resolve(Path::from(".gitignore"));
-        let mut path_buf = path.to_path_buf();
-        if !path_buf.is_file() {
-            path = Arc::new(dir.clone()).resolve(Path::from(".fdignore"));
-            path_buf = path.to_path_buf();
-        }
-        if !path_buf.is_file() {
+        // Both files are honored; patterns from .fdignore are added last, so they take
+        // precedence over .gitignore in the same directory (like in fd).
+        let dir = Arc::new(dir.clone());
+        let files: Vec<Path> = [".gitignore", ".fdignore"]
+            .iter()
+            .map(|name| dir.resolve(Path::from(*name)))
+            .filter(|p| p.to_path_buf().is_file())
+            .collect();
+        if files.is_empty() {
             return self.clone();
         }
-        let gitignore = Gitignore::new(&path_buf);
-        if let Some(err) = gitignore.1 {
-            if let Some(log) = log {
-                log.warn(format!(
-                    "Error while loading ignore file {}: {}",
-                    path.display(),
-                    err
-                ))
+        let mut builder = GitignoreBuilder::new(dir.to_path_buf());
+        for file in &files {
+            if let Some(err) = builder.add(file.to_path_buf()) {
+                if let Some(log) = log {
+                    log.warn(format!(
+                        "Error while loading ignore file {}: {}",
+                        file.display(),
+                        err
+                    ))
+                }
             }
         }
+        let gitignore = match builder.build() {
+            Ok(gitignore) => gitignore,
+            Err(err) => {
+                if let Some(log) = log {
+                    log.warn(format!(
+                        "Error while loading ignore files in {}: {}",
+                        dir.display(),
+                        err
+                    ))
+                }
+                return self.clone();
+            }
+        };
         let mut stack = self.0.as_ref().clone();
-        stack.push(gitignore.0);
+        stack.push(gitignore);
         IgnoreStack(Arc::new(stack))
     }
 
@@ -115,9 +132,16 @@ impl IgnoreStack {
             return false;
         }
         let path = path.to_path_buf();
-        self.0
-            .iter()
-            .any(|gitignore| gitignore.matched(&path, is_dir).is_ignore())
+        // Like git: the ignore file closest to the path decides, so a `!pattern` in a nested
+        // ignore file can re-include a path ignored by a parent directory's file.
+        for gitignore in self.0.iter().rev() {
+            match gitignore.matched(&path, is_dir) {
+                ignore::Match::Ignore(_) => return true,
+                ignore::Match::Whitelist(_) => return false,
+                ignore::Match::None => {}
+            }
+        }
+        false
     }
 }
 
@@ -541,6 +565,29 @@ mod test {
                 vec![hidden_file.clone()]
             );
             assert!(run_walk(Walk::new(), test_root.clone()).is_empty());
+        });
+    }
+
+    /// Both .gitignore and .fdignore are honored (the .fdignore used to be skipped when a
+    /// .gitignore existed), and a nested `!pattern` can re-include what a parent ignored.
+    #[test]
+    fn ignore_files_combine_and_nest() {
+        with_dir("target/test/walk/ignore_files/", |test_root| {
+            std::fs::write(test_root.join(".gitignore"), "a\n*.log\n").unwrap();
+            std::fs::write(test_root.join(".fdignore"), "b\n").unwrap();
+            let sub = test_root.join("sub");
+            create_dir(&sub).unwrap();
+            std::fs::write(sub.join(".gitignore"), "!keep.log\n").unwrap();
+            for f in ["a", "b", "c", "x.log"] {
+                File::create(test_root.join(f)).unwrap();
+            }
+            File::create(sub.join("keep.log")).unwrap();
+            File::create(sub.join("drop.log")).unwrap();
+
+            assert_eq!(
+                run_walk(Walk::new(), test_root.clone()),
+                vec![test_root.join("c"), sub.join("keep.log")]
+            );
         });
     }
 
