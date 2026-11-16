@@ -22,6 +22,22 @@ pub fn reflink(
     ignore_xattr_errors: bool,
     log: &dyn Log,
 ) -> io::Result<()> {
+    // Deduplication shares the data of identical files. Files of different sizes can reach this
+    // point when the size check is disabled (e.g. reports made with --transform). Cloning a
+    // smaller file over a larger one can leave the old tail of the destination in place
+    // (FICLONE with block-aligned sizes), producing a file that matches neither original.
+    let src_len = fs::metadata(src.path.to_path_buf())?.len();
+    let dest_len = fs::metadata(dest.path.to_path_buf())?.len();
+    if src_len != dest_len {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "Failed to deduplicate {dest} -> {src}: the files have different sizes \
+                 ({dest_len} and {src_len} bytes)"
+            ),
+        ));
+    }
+
     // Remember original metadata of the parent directory:
     let dest_parent = dest.path.parent();
     let dest_parent_metadata = dest_parent.map(|p| p.to_path_buf().metadata());
@@ -707,23 +723,19 @@ pub mod test {
                 link: file_2,
             };
 
-            if via_ioctl {
-                assert!(cmd
-                    .execute(true, false, &log)
-                    .unwrap_err()
-                    .to_string()
-                    .starts_with("Failed to deduplicate"));
+            // Files of different sizes are not identical and must never be "deduplicated", on any
+            // code path (this used to replace "too large" by "foo" on the non-ioctl path).
+            let _ = via_ioctl;
+            assert!(cmd
+                .execute(true, false, &log)
+                .unwrap_err()
+                .to_string()
+                .starts_with("Failed to deduplicate"));
 
-                assert!(file_path_1.exists());
-                assert!(file_path_2.exists());
-                assert_eq!(read_file(&file_path_1), "foo");
-                assert_eq!(read_file(&file_path_2), "too large");
-            } else {
-                cmd.execute(true, false, &log).unwrap();
-
-                assert!(file_path_2.exists());
-                assert_eq!(read_file(&file_path_2), "foo");
-            }
+            assert!(file_path_1.exists());
+            assert!(file_path_2.exists());
+            assert_eq!(read_file(&file_path_1), "foo");
+            assert_eq!(read_file(&file_path_2), "too large");
         })
     }
 
@@ -750,8 +762,10 @@ pub mod test {
             let file_path_1 = root.join("file_1");
             let file_path_2 = root.join("file_2");
 
+            // Same size, different content, so we can see whether the data was cloned.
+            // (Files of different sizes are refused, see test_reflink_command_with_file_too_large.)
             write_file(&file_path_1, "foo");
-            write_file(&file_path_2, "f");
+            write_file(&file_path_2, "bar");
 
             let file_1 = PathAndMetadata::new(FcPath::from(&file_path_1)).unwrap();
             let file_2 = PathAndMetadata::new(FcPath::from(&file_path_2)).unwrap();
@@ -759,11 +773,24 @@ pub mod test {
                 target: Arc::new(file_1),
                 link: file_2,
             };
-            cmd.execute(true, false, &log).unwrap();
+            let result = cmd.execute(true, false, &log);
+
+            // With FIDEDUPERANGE (ioctl path) the kernel verifies the contents and refuses;
+            // otherwise (FICLONE fallback, or copying a reflink) the file is replaced.
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            let verified_by_kernel = !crosstest() && fideduperange_supported();
+            #[cfg(not(any(target_os = "linux", target_os = "android")))]
+            let verified_by_kernel = false;
 
             assert!(file_path_1.exists());
             assert!(file_path_2.exists());
-            assert_eq!(read_file(&file_path_2), "foo");
+            if verified_by_kernel {
+                assert!(result.is_err());
+                assert_eq!(read_file(&file_path_2), "bar");
+            } else {
+                result.unwrap();
+                assert_eq!(read_file(&file_path_2), "foo");
+            }
         })
     }
 
