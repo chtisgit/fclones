@@ -185,6 +185,13 @@ fn reflink_overwrite(target: &std::path::Path, link: &std::path::Path) -> io::Re
     }
 }
 
+/// Returns the FIDEDUPERANGE ioctl request code, `_IOWR(0x94, 54, struct file_dedupe_range)`,
+/// where `sizeof(struct file_dedupe_range)` is 24 (the `info[]` array is a flexible member).
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn fideduperange_request_code() -> libc::c_ulong {
+    nix::request_code_readwrite!(0x94, 54, 24) as libc::c_ulong
+}
+
 /// New implementation using FIDEDUPERANGE for safer deduplication
 #[cfg(any(target_os = "linux", target_os = "android"))]
 fn reflink_overwrite_dedupe(target: &std::path::Path, link: &std::path::Path) -> io::Result<()> {
@@ -232,8 +239,15 @@ fn reflink_overwrite_dedupe(target: &std::path::Path, link: &std::path::Path) ->
         info: [FileDedupRangeInfo; 1],
     }
 
-    // Calculate the total size of the structure for the ioctl call
-    const FIDEDUPERANGE_SIZE: usize = size_of::<FileDedupRange>();
+    // The ioctl request code encodes the size of `struct file_dedupe_range` *without* the
+    // trailing flexible array `info[]` (24 bytes). Using the size of our struct, which embeds
+    // one info element, produces a different request code that the kernel rejects with ENOTTY.
+    const FIDEDUPERANGE_SIZE: usize = size_of::<FileDedupRange>() - size_of::<FileDedupRangeInfo>();
+    debug_assert_eq!(
+        request_code_readwrite!(FIDEDUPERANGE_TYPE, FIDEDUPERANGE_NR, FIDEDUPERANGE_SIZE)
+            as libc::c_ulong,
+        fideduperange_request_code()
+    );
 
     // Process deduplication potentially in chunks
     // Prior to Linux kernel 4.18, btrfs had a 16MiB restriction on FIDEDUPERANGE
@@ -282,19 +296,29 @@ fn reflink_overwrite_dedupe(target: &std::path::Path, link: &std::path::Path) ->
         }
 
         // Check for content differences - FIDEDUPERANGE verifies content identity
-        if dedupe_range.info[0].status == FILE_DEDUPE_RANGE_DIFFERS {
+        let status = dedupe_range.info[0].status;
+        if status == FILE_DEDUPE_RANGE_DIFFERS {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "File contents differ, cannot deduplicate",
             ));
+        }
+        // A negative status is a per-destination error code (-errno), e.g. -EOPNOTSUPP when
+        // the filesystem supports FICLONE but not FIDEDUPERANGE (ZFS). The ioctl itself
+        // returns 0 in that case, so this must not be mistaken for success.
+        if status < 0 {
+            return Err(io::Error::from_raw_os_error(-status));
         }
 
         // Get bytes deduped - on older btrfs (pre-kernel 4.18), this may be limited to 16MiB
         // On newer kernels, this will typically process the entire file in one go
         let bytes_deduped = dedupe_range.info[0].bytes_deduped;
         if bytes_deduped == 0 {
-            // No bytes deduped but no error, might be end of file
-            break;
+            // Reported success without deduplicating anything before reaching the end of the
+            // file. Treat it as a failure instead of claiming the file was deduplicated.
+            return Err(io::Error::other(format!(
+                "FIDEDUPERANGE deduplicated no data at offset {offset} of {src_size} bytes"
+            )));
         }
 
         // Move offset for next chunk
@@ -555,26 +579,19 @@ pub mod test {
             return false;
         }
 
-        let dir = tempfile::tempdir().unwrap();
-        let source_path = dir.path().join("source_test");
-        let dest_path = dir.path().join("dest_test");
+        // Probe on the same filesystem the tests use (`with_dir` creates directories under
+        // target/test), and count only an actual success as support: any error means the
+        // FIDEDUPERANGE tests below cannot be meaningful here.
+        with_dir("dedupe/fideduperange_probe", |root| {
+            let source_path = root.join("source_test");
+            let dest_path = root.join("dest_test");
 
-        // Create identical files
-        write_file(&source_path, "test content");
-        write_file(&dest_path, "test content");
+            // Create identical files
+            write_file(&source_path, "test content");
+            write_file(&dest_path, "test content");
 
-        // Try FIDEDUPERANGE
-        let result = reflink_overwrite_dedupe(&source_path, &dest_path);
-
-        match result {
-            Err(e)
-                if e.raw_os_error() == Some(libc::ENOTTY)
-                    || e.raw_os_error() == Some(libc::EOPNOTSUPP) =>
-            {
-                false
-            }
-            _ => true,
-        }
+            reflink_overwrite_dedupe(&source_path, &dest_path).is_ok()
+        })
     }
 
     // Usually /dev/shm only exists on Linux.
@@ -732,6 +749,41 @@ pub mod test {
     fn test_reflink_command_fills_file_with_content_not_ioctl_linux() {
         let _sequential = cfg::CrossTest::new(true);
         test_reflink_command_fills_file_with_content();
+    }
+
+    /// The request code must match `FIDEDUPERANGE` from linux/fs.h (0xc0189436 with the generic
+    /// ioctl encoding used by x86_64 and aarch64). A wrong code makes every call fail with ENOTTY,
+    /// which silently degrades dedupe to the unchecked FICLONE fallback.
+    #[test]
+    #[cfg(all(
+        any(target_os = "linux", target_os = "android"),
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    fn test_fideduperange_request_code_matches_kernel_header() {
+        assert_eq!(fideduperange_request_code(), 0xc018_9436);
+    }
+
+    /// On a filesystem that supports FICLONE but not FIDEDUPERANGE (e.g. ZFS, where the
+    /// kernel reports status -EOPNOTSUPP), the dedupe ioctl must report an error instead of
+    /// pretending success, and `linux_reflink` must still deduplicate through the fallback.
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    fn test_fideduperange_unsupported_is_an_error_not_success() {
+        if !cached_reflink_supported() || fideduperange_supported() {
+            return;
+        }
+        with_dir("dedupe/fideduperange_unsupported", |root| {
+            let source_path = root.join("source_file");
+            let dest_path = root.join("dest_file");
+            write_file(&source_path, "same content");
+            write_file(&dest_path, "same content");
+            let err = reflink_overwrite_dedupe(&source_path, &dest_path).unwrap_err();
+            assert!(
+                err.raw_os_error() == Some(libc::EOPNOTSUPP)
+                    || err.raw_os_error() == Some(libc::ENOTTY),
+                "unexpected error: {err}"
+            );
+        });
     }
 
     // Test that FICLONE overwrites a file even when content is different (unsafe behavior)
