@@ -1,7 +1,7 @@
 //! Removing redundant files.
 
 use std::cmp::{max, min, Reverse};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::io::{ErrorKind, Write};
@@ -750,7 +750,13 @@ impl PartitionedFileGroup {
             "No files would be left after deduplicating"
         );
         let mut commands = Vec::new();
-        let retained_file = Arc::new(self.to_keep.swap_remove(0));
+        // Link to a regular file rather than to a symbolic link, if possible.
+        let target_index = self
+            .to_keep
+            .iter()
+            .position(|f| !is_symlink(&f.path))
+            .unwrap_or(0);
+        let retained_file = Arc::new(self.to_keep.swap_remove(target_index));
         for dropped_file in self.to_drop {
             match strategy {
                 DedupeOp::SymbolicLink => commands.push(FsCommand::SoftLink {
@@ -885,10 +891,38 @@ fn partition(
     to_retain.extend(to_drop.drain(0..missing_count));
 
     assert!(to_retain.len() >= n || to_drop.is_empty());
-    Ok(PartitionedFileGroup {
-        to_keep: to_retain.into_iter().flat_map(|g| g.files).collect(),
-        to_drop: to_drop.into_iter().flat_map(|g| g.files).collect(),
-    })
+    let mut to_keep: Vec<PathAndMetadata> = to_retain.into_iter().flat_map(|g| g.files).collect();
+    let to_drop: Vec<PathAndMetadata> = to_drop.into_iter().flat_map(|g| g.files).collect();
+
+    // A symbolic link and its target can end up in different subgroups (with --match-links or
+    // with isolated roots). Never drop a regular file whose data is kept only through symbolic
+    // links pointing to it: removing or replacing it would leave the kept links dangling.
+    let data_kept: HashSet<FileId> = to_keep
+        .iter()
+        .filter(|f| !is_symlink(&f.path))
+        .map(|f| f.metadata.file_id())
+        .collect();
+    let kept_ids: HashSet<FileId> = to_keep.iter().map(|f| f.metadata.file_id()).collect();
+    let (needed, to_drop): (Vec<_>, Vec<_>) = to_drop.into_iter().partition(|f| {
+        let id = f.metadata.file_id();
+        kept_ids.contains(&id) && !data_kept.contains(&id) && !is_symlink(&f.path)
+    });
+    for f in needed {
+        log.warn(format!(
+            "Keeping {}: a symbolic link to it is kept, removing it would break that link",
+            f.path.display()
+        ));
+        to_keep.push(f);
+    }
+
+    Ok(PartitionedFileGroup { to_keep, to_drop })
+}
+
+/// Returns true if the path is a symbolic link (does not follow the link).
+fn is_symlink(path: &Path) -> bool {
+    fs::symlink_metadata(path.to_path_buf())
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
 }
 
 /// Generates a list of commands that will remove the redundant files in the groups provided
@@ -1638,6 +1672,43 @@ mod test {
             assert_eq!(FileId::new(&Path::from(&file_b1)).unwrap(), file_id);
             assert_eq!(FileId::new(&Path::from(&file_b2)).unwrap(), file_id);
         })
+    }
+
+    /// With `--symbolic-links --match-links`, a symlink and its target are separate subgroups.
+    /// When the link is kept, its target must not be removed or replaced (that used to delete
+    /// the only copy of the data and leave a dangling link).
+    #[test]
+    #[cfg(unix)]
+    fn test_never_drops_target_of_kept_symlink() {
+        use std::os::unix::fs;
+
+        for op in [DedupeOp::Remove, DedupeOp::HardLink, DedupeOp::SymbolicLink] {
+            with_dir("dedupe/keep_symlink_target", |root| {
+                let log = StdLog::new();
+                let target = root.join("b");
+                let link = root.join("a"); // sorts first, so it is the file kept by default
+                write_file(&target, "real data");
+                fs::symlink("b", &link).unwrap();
+
+                let group_config = GroupConfig {
+                    paths: vec![Path::from(root)],
+                    symbolic_links: true,
+                    match_links: true,
+                    ..GroupConfig::default()
+                };
+                let groups = group_files(&group_config, &log).unwrap().groups;
+                assert_eq!(groups.len(), 1);
+                let dedupe_config = DedupeConfig {
+                    match_links: true,
+                    ..DedupeConfig::default()
+                };
+                let script = dedupe(groups, op.clone(), &dedupe_config, &log);
+                run_script(script, false, false, &log);
+
+                assert_eq!(read_file(&target), "real data", "{op:?}");
+                assert_eq!(read_file(&link), "real data", "{op:?}");
+            })
+        }
     }
 
     #[test]
