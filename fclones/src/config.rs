@@ -455,6 +455,29 @@ impl GroupConfig {
         }
     }
 
+    /// Returns the filter that decides which groups end up in the final report.
+    ///
+    /// Unlike [`group_filter`](Self::group_filter), which is used to prune groups between the
+    /// stages and therefore must not drop small groups when a transform is set, this one uses
+    /// the replication factor actually requested by the user.
+    pub fn report_filter(&self) -> FileGroupFilter {
+        let mut filter = self.group_filter();
+        if let Overreplicated(_) = filter.replication {
+            filter.replication = Overreplicated(self.reported_rf_over());
+        }
+        filter
+    }
+
+    /// The `--rf-over` value that applies to the final report: the user's value or 1.
+    /// For searches for unique or under-replicated files this is 0 (every group is reported).
+    pub fn reported_rf_over(&self) -> usize {
+        if self.rf_under.is_some() || self.unique {
+            0
+        } else {
+            self.rf_over.unwrap_or(1)
+        }
+    }
+
     pub fn rf_over(&self) -> usize {
         // don't prune small groups if:
         // - there is transformation defined

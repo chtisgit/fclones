@@ -1276,6 +1276,11 @@ pub fn group_files(config: &GroupConfig, log: &dyn Log) -> Result<GroupedFiles, 
             }
         }
     };
+    // Some paths through the pipeline (--transform, --skip-content-hash, groups passed through
+    // without rehashing) only applied the lenient between-stages filter. Make sure the report
+    // contains exactly the groups the user asked for.
+    let report_filter = config.report_filter();
+    groups.retain(|g| g.matches_strictly(&report_filter));
     groups.par_sort_by_key(|g| Reverse((g.file_len, g.file_hash.u128_prefix())));
     groups
         .par_iter_mut()
@@ -1296,16 +1301,17 @@ pub fn group_files(config: &GroupConfig, log: &dyn Log) -> Result<GroupedFiles, 
 pub fn write_report(config: &GroupConfig, log: &dyn Log, grouped: &GroupedFiles) -> io::Result<()> {
     let now = Local::now();
     let groups = grouped.groups.as_slice();
+    let report_filter = config.report_filter();
 
     let total_count = file_count(groups.iter());
     let total_size = total_size(groups.iter());
 
     let (redundant_count, redundant_size) = groups.iter().fold((0, FileLen(0)), |res, g| {
-        let count = g.redundant_count(&config.group_filter());
+        let count = g.redundant_count(&report_filter);
         (res.0 + count, res.1 + g.file_len * count as u64)
     });
     let (missing_count, missing_size) = groups.iter().fold((0, FileLen(0)), |res, g| {
-        let count = g.missing_count(&config.group_filter());
+        let count = g.missing_count(&report_filter);
         (res.0 + count, res.1 + g.file_len * count as u64)
     });
 
@@ -1942,6 +1948,55 @@ mod test {
             let results = group_files(&config, &log).unwrap().groups;
             assert_eq!(results.len(), 1);
             assert_eq!(results[0].files.len(), 2);
+        })
+    }
+
+    /// With --transform, files that are unique after the transform must not be reported as
+    /// "duplicate groups" of size 1 (the between-stages filter uses rf_over = 0 there).
+    #[test]
+    #[cfg(unix)]
+    fn transformed_unique_files_are_not_reported() {
+        with_dir("target/test/group/transform/unique/", |root| {
+            let paths = ["a", "b", "c", "d"].map(|n| root.join(n));
+            write_file(&paths[0], "one");
+            write_file(&paths[1], "two");
+            write_file(&paths[2], "same");
+            write_file(&paths[3], "same");
+
+            let log = test_log();
+            let config = GroupConfig {
+                paths: paths.iter().map(Path::from).collect(),
+                transform: Some("cat".to_string()),
+                ..GroupConfig::default()
+            };
+            let results = group_files(&config, &log).unwrap().groups;
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0].files.len(), 2);
+        })
+    }
+
+    /// --unique together with --skip-content-hash must report only unique files
+    /// (upstream issue #320): that path never applied the final strict filter.
+    #[test]
+    fn unique_files_with_skip_content_hash() {
+        with_dir("main/unique_files_skip_content_hash", |root| {
+            let dup1 = root.join("dup1");
+            let dup2 = root.join("dup2");
+            let unique = root.join("unique");
+            write_test_file(&dup1, b"duplicate", b"", b"");
+            write_test_file(&dup2, b"duplicate", b"", b"");
+            write_test_file(&unique, b"unique___", b"", b"");
+
+            let log = test_log();
+            let config = GroupConfig {
+                paths: vec![dup1.into(), dup2.into(), unique.clone().into()],
+                unique: true,
+                skip_content_hash: true,
+                ..GroupConfig::default()
+            };
+            let results = group_files(&config, &log).unwrap().groups;
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0].paths(), vec![Path::from(&unique)]);
         })
     }
 

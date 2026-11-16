@@ -167,7 +167,7 @@ pub fn run_dedupe(op: DedupeOp, config: DedupeConfig, log: &dyn Log) -> Result<(
         dedupe_config.match_links |= c.match_links;
 
         if dedupe_config.rf_over.is_none() {
-            dedupe_config.rf_over = Some(c.rf_over())
+            dedupe_config.rf_over = Some(c.reported_rf_over())
         }
         if dedupe_config.isolated_roots.is_empty() && c.isolate {
             dedupe_config.isolated_roots = c.input_paths().collect();
