@@ -419,10 +419,23 @@ where
             )
         })?;
 
+        // A hand-edited or truncated report must give an error, not a panic.
+        let invalid = |what: &str, e: &dyn std::fmt::Display| {
+            Error::new(
+                ErrorKind::InvalidData,
+                format!("Malformed group header: invalid {what}: {e}: {header_str}"),
+            )
+        };
+        let file_hash = FileHash::from_str(captures.get(1).unwrap().as_str())
+            .map_err(|e| invalid("hash", &e))?;
+        let file_len = captures.get(2).unwrap().as_str().parse::<u64>();
+        let file_len = FileLen(file_len.map_err(|e| invalid("file size", &e))?);
+        let count = captures.get(3).unwrap().as_str().parse::<usize>();
+        let count = count.map_err(|e| invalid("file count", &e))?;
         Ok(Some(GroupHeader {
-            file_hash: FileHash::from_str(captures.get(1).unwrap().as_str()).unwrap(),
-            file_len: FileLen(captures.get(2).unwrap().as_str().parse::<u64>().unwrap()),
-            count: captures.get(3).unwrap().as_str().parse::<usize>().unwrap(),
+            file_hash,
+            file_len,
+            count,
         }))
     }
 
@@ -903,6 +916,28 @@ mod test {
         assert!(group_iterator.next().is_ok());
         assert!(group_iterator.next().is_err());
         assert!(group_iterator.next().unwrap().is_none());
+    }
+
+    /// Group headers that match the expected shape but contain invalid values (odd number of
+    /// hex digits, numbers that overflow) used to panic.
+    #[test]
+    fn test_text_report_iterator_reports_invalid_header_values_as_errors() {
+        for header in [
+            "abc, 4 B (4 B) * 2:",
+            "00, 99999999999999999999999 B (4 B) * 2:",
+            "00, 4 B (4 B) * 99999999999999999999999:",
+        ] {
+            let mut output = NamedTempFile::new().unwrap();
+            let input = output.reopen().unwrap();
+            writeln!(output, "{header}").unwrap();
+            writeln!(output, "    /file1").unwrap();
+            writeln!(output, "    /file2").unwrap();
+            drop(output);
+
+            let mut group_iterator = TextReportIterator::new(BufReader::new(input));
+            let err = group_iterator.next().unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::InvalidData, "{header}");
+        }
     }
 
     #[test]
