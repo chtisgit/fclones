@@ -2,6 +2,7 @@
 
 use std::cmp::{max, min, Reverse};
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
 use std::fmt::{Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::io::{ErrorKind, Write};
@@ -255,17 +256,23 @@ impl FsCommand {
     /// Returns a random temporary file name in the same directory, guaranteed to not collide with
     /// any other file in the same directory
     pub fn temp_file(path: &Path) -> Path {
+        // Most file systems limit a file name to 255 bytes (NTFS: 255 UTF-16 units).
+        const MAX_NAME_LEN: usize = 255;
+        let suffix = rand::thread_rng()
+            .sample_iter(&Alphanumeric)
+            .take(24)
+            .map(char::from)
+            .collect::<String>();
         let mut name = path
             .file_name()
             .expect("must be a regular file with a name");
-        name.push(".");
-        name.push(
-            rand::thread_rng()
-                .sample_iter(&Alphanumeric)
-                .take(24)
-                .map(char::from)
-                .collect::<String>(),
-        );
+        if name.len() + 1 + suffix.len() <= MAX_NAME_LEN {
+            name.push(".");
+            name.push(&suffix);
+        } else {
+            // Appending to a long name would fail with "File name too long"
+            name = OsString::from(format!(".fclones-tmp.{suffix}"));
+        }
         match path.parent() {
             Some(parent) => parent.join(Path::from(name)),
             None => Path::from(name),
@@ -1262,6 +1269,33 @@ mod test {
             temp.file_name().unwrap().len()
         );
         assert_eq!(path.parent(), temp.parent());
+    }
+
+    /// Appending 25 characters to a long name exceeded the 255 byte limit, so linking or
+    /// deduplicating files with long names failed with "File name too long" (upstream #353).
+    #[test]
+    fn test_hard_link_command_works_with_long_file_names() {
+        with_dir("dedupe/long_names", |root| {
+            let log = StdLog::new();
+            let target_path = root.join("t".repeat(250));
+            let link_path = root.join("l".repeat(250));
+            write_file(&target_path, "content");
+            write_file(&link_path, "content");
+            let tmp = FsCommand::temp_file(&Path::from(&link_path));
+            assert!(tmp.file_name().unwrap().len() <= 255);
+            assert_eq!(tmp.parent(), Path::from(&link_path).parent());
+
+            FsCommand::HardLink {
+                target: Arc::new(PathAndMetadata::new(Path::from(&target_path)).unwrap()),
+                link: PathAndMetadata::new(Path::from(&link_path)).unwrap(),
+            }
+            .execute(false, false, &log)
+            .unwrap();
+            assert_eq!(
+                FileId::new(&Path::from(&link_path)).unwrap(),
+                FileId::new(&Path::from(&target_path)).unwrap()
+            );
+        })
     }
 
     #[test]
