@@ -275,8 +275,9 @@ impl<'a> Walk<'a> {
         // For progress reporting
         (self.on_visit)(&entry.path);
 
-        // Skip hidden files
-        if !self.hidden {
+        // Skip hidden files, but not the input paths themselves (level 0): a hidden directory or
+        // file given explicitly (or a hidden current directory passed as ".") must be scanned.
+        if !self.hidden && level > 0 {
             if let Some(name) = entry.path.file_name_cstr() {
                 if name.to_string_lossy().starts_with('.') {
                     return;
@@ -508,11 +509,7 @@ mod test {
             let sub = test_root.join("sub");
             let deeper = sub.join("deeper");
             create_dir_all(&deeper).unwrap();
-            let files = [
-                test_root.join("a"),
-                sub.join("b"),
-                deeper.join("c"),
-            ];
+            let files = [test_root.join("a"), sub.join("b"), deeper.join("c")];
             for f in &files {
                 File::create(f).unwrap();
             }
@@ -524,6 +521,26 @@ mod test {
             assert_eq!(walk_with_depth(1), files[..1].to_vec());
             assert_eq!(walk_with_depth(2), files[..2].to_vec());
             assert_eq!(walk_with_depth(usize::MAX), files.to_vec());
+        });
+    }
+
+    /// A hidden input path given explicitly must be scanned (only hidden entries found while
+    /// walking are skipped). `fclones group ~/.config` used to find nothing, silently.
+    #[test]
+    fn hidden_input_path_is_scanned() {
+        with_dir("target/test/walk/hidden_root/", |test_root| {
+            let hidden_dir = test_root.join(".hidden");
+            create_dir(&hidden_dir).unwrap();
+            let file = hidden_dir.join("file");
+            let hidden_file = hidden_dir.join(".file");
+            File::create(&file).unwrap();
+            File::create(&hidden_file).unwrap();
+            assert_eq!(run_walk(Walk::new(), hidden_dir.clone()), vec![file]);
+            assert_eq!(
+                run_walk(Walk::new(), hidden_file.clone()),
+                vec![hidden_file.clone()]
+            );
+            assert!(run_walk(Walk::new(), test_root.clone()).is_empty());
         });
     }
 
