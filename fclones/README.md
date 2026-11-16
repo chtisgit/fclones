@@ -7,8 +7,17 @@ fclones
 [![Documentation](https://docs.rs/fclones/badge.svg)](https://docs.rs/fclones)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-This is the repo for command line fclones and its core libraries.
+This is *a fork of* the repo for command line `fclones` and its core libraries.
 For the desktop frontend, see [fclones-gui](https://github.com/pkolaczk/fclones-gui).
+
+This fork was reviewed by Claude Opus 5.5 who found a few issues and was then tasked to review all pending
+pull requests on the original repo and apply them if they make the program better and fix them if they
+introduce bugs. It was also tasked to look through the GitHub issues of the original repo and fix those.
+A subset of GitHub issues was fixed and a subset of pull requests was merged, see ai/FIXES.md.
+For what wasn't applied/fixed, see ai/REMAINING.md.
+The upstream repo looks unmaintained, so this is not going back as a big pull request, unless requested.
+
+I am not *really* familiar with Rust so I cannot attest any of this.
 
 ---
 
