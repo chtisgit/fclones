@@ -272,13 +272,14 @@ impl DiskDevices {
         result
     }
 
-    /// Returns the mount point holding given path
-    pub fn get_mount_point(&self, path: &Path) -> &Path {
+    /// Returns the mount point holding given path, or `None` if it is not known
+    /// (e.g. when no disks could be detected).
+    /// Mount points are sorted from the most nested one, so the first prefix is the right one.
+    pub fn get_mount_point(&self, path: &Path) -> Option<&Path> {
         self.mount_points
             .iter()
             .map(|(p, _)| p)
             .find(|p| p.is_prefix_of(path))
-            .unwrap_or(&self.mount_points[0].0)
     }
 
     /// Returns the disk device which holds the given path
@@ -340,6 +341,25 @@ impl Index<usize> for DiskDevices {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    /// Without any detected mount point (e.g. in some containers) this used to panic with an
+    /// out-of-bounds index; the fallback was also the most nested mount, not a sensible one.
+    #[test]
+    fn mount_point_lookup() {
+        let mut devices = DiskDevices::single(DiskKind::SSD, 1);
+        devices.mount_points.clear();
+        assert_eq!(devices.get_mount_point(&Path::from("/a/b")), None);
+
+        devices.mount_points = vec![(Path::from("/home"), 0), (Path::from("/"), 0)];
+        assert_eq!(
+            devices.get_mount_point(&Path::from("/home/x")),
+            Some(&Path::from("/home"))
+        );
+        assert_eq!(
+            devices.get_mount_point(&Path::from("/homework/x")),
+            Some(&Path::from("/"))
+        );
+    }
 
     #[test]
     #[cfg_attr(not(target_os = "linux"), ignore)]

@@ -757,6 +757,8 @@ impl PartitionedFileGroup {
     }
 
     fn are_on_same_mount(devices: &DiskDevices, file1: &Path, file2: &Path) -> bool {
+        // If the mount points are unknown, try a rename anyway: moving falls back to copying
+        // when the rename fails.
         let mount1 = devices.get_mount_point(file1);
         let mount2 = devices.get_mount_point(file2);
         mount1 == mount2
