@@ -1,0 +1,70 @@
+GOAL: Consolidate open upstream work and known bugs into this fclones fork
+==========================================================================
+
+Upstream repository: https://github.com/pkolaczk/fclones
+Bug review:          CLAUDE_REVIEW.md (this repository)
+Work log:            GOAL.LOG (this repository)
+
+General rule
+------------
+Record every step in GOAL.LOG as the work is done: what was examined, what
+was decided, and why. That includes decisions *not* to do something, for
+example rejecting a pull request or leaving an issue open. GOAL.LOG must let a
+reader reconstruct and review every decision without re-doing the research.
+
+
+Tasks
+-----
+
+1. Collect open pull requests
+   Fetch all open pull requests from https://github.com/pkolaczk/fclones/pulls,
+   including their description, discussion, changed files and code.
+
+2. Collect open issues
+   Fetch all open issues from https://github.com/pkolaczk/fclones/issues,
+   including their description and discussion.
+
+3. Cross-correlate
+   Map the relationships between open issues, open pull requests and the
+   findings in CLAUDE_REVIEW.md:
+     - which pull requests fix which issues,
+     - which pull requests or issues correspond to which review findings,
+     - which review findings are not yet covered by any issue or pull request.
+   Base the mapping on the actual content (descriptions and code changes),
+   not on titles alone.
+
+4. Apply pull requests that fix bugs from CLAUDE_REVIEW.md
+   For each pull request that addresses a finding in CLAUDE_REVIEW.md:
+     - Read the complete diff line by line before running anything. Flag
+       suspicious or bad code (unsafe or destructive operations, unrelated
+       changes, missing error handling, new panics, edge cases it gets wrong)
+       and inspect and test each flagged spot specifically. Record the
+       findings in GOAL.LOG.
+     - Check that it really fixes the problem and introduces no regressions.
+       Reproduce the bug before the change, confirm it is gone afterwards,
+       and run the test suite. Never apply a pull request unverified.
+     - Apply it with correct attribution: keep the original author as the
+       commit author (e.g. by cherry-picking the original commits) and
+       reference the upstream pull request number in the commit message.
+     - If it is incomplete or partly wrong, apply it with attribution and
+       add the needed corrections as separate commits.
+
+5. Review and apply the remaining pull requests
+   Carefully review every other open pull request, using the same review and
+   verification steps as in task 4: read the full diff, flag suspicious or
+   bad code for further inspection and testing, and verify the change before
+   applying it. Apply it (with the same attribution rules as in task 4) if it
+   contains a valid fix or a feature or improvement worth including. Leave out
+   spam, obsolete or harmful changes, and record the reason in GOAL.LOG.
+
+6. Fix the remaining review findings
+   Implement fixes for the findings in CLAUDE_REVIEW.md that no pull request
+   covers. Where practical, add a regression test that fails before the fix
+   and passes after it.
+
+7. Work through the remaining open issues
+   Go through the open issues that are still unresolved after tasks 4-6.
+     - If an issue can be fixed without further information from the
+       reporter, fix it (with a regression test where practical).
+     - Otherwise leave it open and record it in GOAL.LOG as unfixed, with
+       the reason, e.g. "cannot reproduce" or "needs more information".

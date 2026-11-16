@@ -1,0 +1,505 @@
+GOAL.LOG: work log for the tasks in GOAL.TXT
+============================================
+
+Conventions
+- Entries are in chronological order, grouped by task.
+- "PR #n" / "issue #n" refer to https://github.com/pkolaczk/fclones.
+- "Finding X" refers to an entry in CLAUDE_REVIEW.md (C1..C5, H1..H9, M1..M13, L1..L15).
+
+Setup (2026-11-16)
+- Working in a Docker container (passwordless sudo, isolated from the host).
+  Installed: Rust stable 1.100.0 via rustup, build-essential, curl, git, jq.
+- Base: a74f90d (fclones 0.35.0, origin = chtisgit/fclones fork of pkolaczk/fclones).
+- All work happens on the new branch `consolidate-upstream`; main is untouched.
+- Commit attribution policy:
+  - Applied upstream PRs keep the original author as git author (cherry-pick of the
+    original commits where possible); commit message references "upstream PR #n".
+  - Corrections on top of a PR go in separate commits.
+  - Own fixes: author Christian Fiedler, with a Co-Authored-By trailer for Claude.
+- GitHub access: public REST API without login (60 requests/hour) and anonymous
+  `git fetch` of pull/N/head refs. No gh CLI (it requires a login even for reads).
+
+Task 1: fetch open pull requests (2026-11-16)
+- Upstream main == a74f90d == our base, so all PRs apply to the same code we reviewed.
+- Added remote `upstream` (https://github.com/pkolaczk/fclones.git) and fetched every open
+  PR head as refs/pr/<n> (anonymous git fetch of refs/pull/<n>/head).
+- 18 open PRs: #259 #291 #299 #317 #318 #331 #334 #335 #339 #340 #341 #348 #349 #350 #352
+  #357 #359 #365. All are based on a74f90d except #259 (older base a55e427d, README-only).
+- Descriptions, discussion comments (609 repo-wide) and review comments (14) fetched via
+  the REST API, stored as working data outside the repo.
+- Size: most are small; big ones are #317 (36 files, +1949/-1427), #299 (+599, 16 commits),
+  #339/#340/#341 (+432..+831; titles are machine-generated strings, bodies in Chinese
+  describing real dedupe/report features, so they need a real review, not a spam verdict
+  by title).
+
+Task 2: fetch open issues (2026-11-16)
+- 92 open issues (110 open items minus the 18 PRs), with all their comments.
+
+Task 3: cross-correlation of issues, PRs and CLAUDE_REVIEW.md (2026-11-16)
+Method: read every PR description, discussion and full diff (git diff upstream/main...pr/N),
+and every issue body with all comments. Mapping is based on content, not titles.
+
+3a. Pull requests -> issues -> review findings
+- PR #365 (Windows non-UTF-8 names, path.rs)  fixes issue #364, the crash in #298;  = finding L7 (Windows half).
+- PR #359 (canonicalize input paths)          fixes issue #351 ("." / "../x" roots break --isolate).
+                                              NOT in my review (new bug). Unrelated to H5 despite both
+                                              touching --isolate.
+- PR #299 (FIDEDUPERANGE for reflink)         addresses issue #293 (+ #113 partially);  = finding M12.
+                                              Diff review: ioctl request code encodes size 56
+                                              (header + inline info[1]) instead of 24 -> kernel returns
+                                              ENOTTY -> PR always falls back to FICLONE; its new tests skip
+                                              themselves. Verified with a C probe against linux/fs.h on
+                                              this machine (real FIDEDUPERANGE = 0xc0189436, PR = 0xc0389436
+                                              -> ENOTTY). Also: negative per-destination `status` (e.g.
+                                              -EOPNOTSUPP on ZFS) is treated as success.
+- PR #334 (--ignore-xattr-errors)             fixes issue #333 (macOS com.apple.provenance). No finding.
+- PR #335 (collapse reflinked files in group) addresses issues #301, #327, #195, #368. No finding.
+                                              Diff review: drops reflinked copies from groups by default,
+                                              which also changes what remove/move see and how
+                                              --isolate/--unique count replicas.
+- PR #349 (scanned count/size in report)      implements issue #347. No finding.
+- PR #350 (README report example)             stacked on #349; docs.
+- PR #348 (io::Error::other)                  lint cleanup. No issue, no finding.
+- PR #357 (README one pattern per flag)       fixes docs issues #310, #332 (also the bad advice in #361).
+- PR #352 (README --threads example)          docs; same root cause as #310 (one value per flag).
+- PR #291, #318, #331 (README links)          dead links: verified old URLs 404, new URLs 200.
+- PR #259 (README shell aliases)              no issue.
+- PR #339/#340/#341 (stacked; dedupe group validation, helper methods, JSON dry-run)
+                                              conceptually related to issue #84 (stale report) and
+                                              #197/#292 (dedupe log). Diff review found defects (task 5).
+- PR #317 (deps update, edition 2024, MSRV 1.89, lazy_static removal, clippy/shellcheck style)
+                                              no issue; does not fix any finding (checked: mklink order,
+                                              `let _ = lock` etc. unchanged).
+
+3b. Review findings -> issues / PRs
+- C1 (in-place+no-copy deletes files)   no issue, no PR.
+- C2 (-S -H remove deletes symlink target) no issue, no PR.
+- C3 (report reader trims paths)        issue #275 (Em Space U+2003 dropped: str::trim strips Unicode
+                                        whitespace). No PR.
+- C4 / H2 (transform output truncation, deadlock) no issue, no PR. (#145 comment about 1:1 transforms
+                                        is unrelated.)
+- C5 (lock is a no-op)                  no issue, no PR.
+- H1 (-n panics)                        issue #302 (a fork has a fix; no PR upstream).
+- H3 (--max-suffix-size underflow)      issue #303 (EINVAL with --max-suffix-size 7680KiB).
+- H4 (priority top/bottom combos)       issue #354 (2nd comment: "priority top and bottom lead to
+                                        similar results"); the main request of #354/#263 (keep files
+                                        in command-line order) is a separate feature.
+- H5 (arg::split byte/char)             no issue, no PR.
+- H6 (--transform reports unique files) no issue. Related root cause (final strict filter not
+                                        applied): issue #320 (--unique + --skip-content-hash) - new bug,
+                                        not in my review; #345 most likely the same (no command given).
+- H7 (lock needs write access)          issue #113 (read-only files/snapshots); `--no-lock` workaround
+                                        mentioned by the maintainer there.
+- H8, H9 (regex anchoring, exclude prefix) no issue, no PR.
+- M1, M3, M4, M6, M9, M10, M13          no issue, no PR.
+- M2 (hidden explicit roots)            no issue (#298 asks for the Windows hidden attribute = feature).
+- M5 (transform pre-flight check)       issue #288 ("transform command can't find binaries"; the
+                                        absolute path /usr/bin/exiv2 is rejected exactly as found).
+- M7 (hard links inflate stats)         issues #268, #257 (sizes larger than real usage), #250 (unclear,
+                                        ZFS, no reproduction data).
+- M8 (dry-run script)                   issue #367 (Windows mklink order); #90/#292 (script semantics).
+- M11 (cache/stale content by mtime)    issue #84 (content changed with preserved mtime -> data loss with
+                                        `link`); ctime check suggested there.
+- M12 (dedupe after transform / FICLONE) issue #293, PR #299.
+- L4 ('˜' instead of '~')               issue #366.
+- L7 (path conversion panics)           issues #364, #298; PR #365 (Windows part).
+- Other L items                         no issue, no PR.
+
+3c. Bugs reported in issues that are NOT in CLAUDE_REVIEW.md
+- #351 relative/"." --isolate roots (PR #359).
+- #320 --unique with --skip-content-hash reports duplicates (and probably #345).
+- #353 temp file name = original name + 25 chars -> ENAMETOOLONG for long names (link/dedupe fail).
+- #322 hard link limit (EMLINK / os error 1142) when one group has more links than the fs allows.
+- #323 / #337 sysinfo disk enumeration stats every mount point -> triggers autofs/automounts, hangs.
+- #84 change detection after group (see M11).
+- #164 shell completion: already implemented in our base (c0865f5) -> can be closed upstream.
+
+3d. Remaining issues: feature requests, questions, packaging or environment problems (no code bug
+    in this repo): #31 #51 #94 #133 #145 #146 #156 #157 #159 #170 #174 #192 #195 #197 #230 #249
+    #251 #253 #254 #255 #258 #262 #263 #265 #266 #270 #271 #272 #279 #284 #285 #286 #287 #292
+    #294 #296 #297 #298(feature part) #300 #301 #305 #307 #308 #309 #311 #313 #314 #315 #316
+    #319 #321 #324 #325 #326 #327 #330 #336 #347 #355 #356 #358 #360 #361 #362 #363 #368.
+    Handled in task 7.
+
+Task 4: apply PRs that fix findings from CLAUDE_REVIEW.md (2026-11-16)
+Candidates from task 3: PR #365 (finding L7), PR #299 (finding M12). No other PR fixes a finding.
+Baseline before any change: cargo test = 170 lib + 4 bin + 2 doc tests pass. Windows target:
+lib/bin build OK, test build fails (pre-existing E0308 at group.rs:1984, also noted by the #365 author).
+
+PR #365 (Mathjk) - APPLIED as eed7415 (cherry-pick, author kept, message references the PR).
+- Read: 2 functions in path.rs (Windows only) + Windows-only test. Replaces to_str().unwrap()
+  with as_encoded_bytes()/from_encoded_bytes_unchecked(). Flagged spot: the `unsafe`
+  from_encoded_bytes_unchecked. Checked every way a Path component is built (os_to_c_str from
+  an OsStr, CString literals ".", components copied from existing Paths, stfu8-decoded strings
+  converted via OsString) - all are valid OsStr encodings, so the SAFETY comment holds.
+  Remaining `CString::new(..).unwrap()` on interior NUL is unchanged and the same as on Unix.
+- Verified: cross-check for x86_64-pc-windows-gnu (lib + bin) compiles; Linux tests pass.
+- Extra commit f686978 (own): fixed the pre-existing Windows test-build error at group.rs:1984
+  (`location: id * 1024` with id: u128 on Windows) so the PR's Windows test can be built.
+- Runtime check of the Windows test under Wine: see entry below.
+
+PR #299 (Patrick Wolf) - APPLIED as 64b4d23 (16 PR commits squashed into one commit authored by
+Patrick Wolf; the squash is stated in the message) + correction 936f6bb (own).
+- Read: new reflink_overwrite_dedupe() + fallback in linux_reflink + 7 tests. Flagged spots:
+  (1) ioctl size, (2) handling of the per-destination status, (3) the bytes_deduped==0 break,
+  (4) the test helper fideduperange_supported().
+- Verified the flags:
+  (1) C probe against linux/fs.h: FIDEDUPERANGE = 0xc0189436 (struct size 24); the PR encodes
+      size 56 -> 0xc0389436 -> kernel returns ENOTTY on every filesystem -> the PR always falls
+      back to the unchecked FICLONE. Its FIDEDUPERANGE tests printed "Skipping" and passed vacuously.
+  (2) On this ZFS the correct ioctl returns 0 with status=-95 (EOPNOTSUPP), bytes_deduped=0: the
+      PR would report that as success.
+  (3) success with 0 bytes deduped -> loop break -> Ok: false success.
+  (4) helper probes /tmp (overlayfs here) but tests run in target/test (ZFS), and every error
+      other than ENOTTY/EOPNOTSUPP counted as "supported" -> after fixing (1) the 4 tests ran on
+      ZFS and failed.
+- Decision: apply. With the corrections it is never less safe than before (unsupported ->
+  same FICLONE as before; supported -> kernel-verified dedupe), and it addresses #293/M12.
+- Correction commit 936f6bb fixes (1)-(4) and adds two tests (request code == kernel value;
+  unsupported FIDEDUPERANGE is an error). End-to-end on ZFS: `fclones dedupe` still dedupes
+  (via FICLONE fallback), contents equal.
+- NOT verifiable here: the FIDEDUPERANGE success path and the "contents differ" rejection need
+  btrfs/XFS; only ZFS (FICLONE yes, FIDEDUPERANGE no) and tmpfs (neither) are available and the
+  container has no mount capability. Those 4 tests skip with the correct reason now.
+- Tests after task 4: 178 lib + 4 bin + 2 doc pass; cargo fmt clean.
+- PR #365 runtime check under Wine (installed mingw-w64 + wine64 in the container):
+  `cargo test --target x86_64-pc-windows-gnu --lib path::` with #365: 9 pass / 2 fail
+  (file_name, encode_decode_stfu8); the PR's new test non_utf8_file_name PASSES.
+  Same command on the base commit (worktree at a74f90d + the test-build fix): 8 pass / the same
+  2 fail -> both failures pre-exist on Windows (Path::file_name only special-cases "/" and not
+  "\\" for roots, cf. review L-items) and are not caused by #365. => #365 verified.
+
+Task 5: review and apply the remaining PRs (2026-11-16)
+PR #359 (Sami Farin) - APPLIED as cfb5d1b (cherry-pick, author kept).
+- Read: GroupConfig::input_paths now canonicalizes like Walk::absolute (dirs and parent dirs
+  canonicalized, file names kept so file symlinks survive); run_dedupe normalizes explicitly given
+  --isolate roots the same way; new test. Flagged: (a) normalization code duplicated in main.rs
+  (style only); (b) dedupe side: `else` branch also runs when the group run had no --isolate ->
+  maps an empty vector, harmless; (c) extra stat()+canonicalize per input path (also per --stdin
+  line) - acceptable cost.
+- Verified: reproduced issue #351 on our build before applying (`-I . ../2` -> 2 groups,
+  `-I . /abs/2` -> 1 group, both expected 0); after: 0 and 0, still 2 without -I. Dedupe side:
+  report of `-I . ../2` with 1/f1,1/f2,2/f3 -> `remove --dry-run` removes 2/f3 only (whole root
+  subgroup), i.e. isolate semantics preserved.
+- Side effect found while testing: my correction 936f6bb made fideduperange_supported() probe in a
+  shared directory; parallel tests raced on it (1 failure). Fixed in 8ababe6 (OnceLock); 5
+  consecutive full test runs green (179 tests).
+
+Docs PRs - APPLIED (author kept, squashed where the PR had 2 commits, PR referenced):
+- #357 (cplieger) 89d0c00: one pattern per --name/--exclude flag. Verified with our binary: the
+  old example fails ("Can't access '*.png'"), the new one works.
+- #352 (InternetWorkAcct) c5348c4: repeated --threads. Verified the old example fails the same way,
+  the new one runs without error.
+- #291 (Yulia) bbb33e6, #318 (Eric Perko) bcf60ea, #331 (Evan Kohilas) 5f5ea7f: links verified
+  (old URLs 404, new URLs 200). #318 conflicted with #291 on the adjacent line; resolved keeping
+  both changes (noted in the commit message).
+
+PR #348 (Jeffrey Wall) - APPLIED as c3798ee. Mechanical io::Error::new(Other, ..) ->
+  io::Error::other(..) (stable since 1.74 = MSRV). Read every hunk: no kind changes for
+  e.kind()-forwarding sites. clippy io_other_error hits: 33 before (incl. the ones added by the
+  #299 code) -> 0 after; tests green.
+
+PR #349 (Jeffrey Wall) - APPLIED as baf6228 (+ adaptation commit, see below).
+- Read: carries the scan count/size out of scan_files via GroupedFiles {groups, scan_stats};
+  new `# Scanned:` text header line (parsed optionally) and serde(default) JSON fields; tests.
+  Flagged: (a) public API change (group_files/write_report signatures) - acceptable for a 0.x
+  crate, noted; (b) forward compatibility: a report with the new `# Scanned:` line cannot be read
+  by older fclones versions (they expect `# Total:` after `# Base dir:`) - acceptable, documented
+  here; (c) the optional-line parsing reads one line ahead - checked that a legacy header still
+  parses (PR test + my end-to-end check below).
+- Verified end to end: text header shows `# Scanned: 20 B (20 B) in 3 files` next to `# Total:
+  8 B in 2 files`, JSON has scanned_file_count/size; `remove --dry-run` reads both the new report
+  and the same report with the Scanned line deleted (legacy format).
+- Interaction with PR #359: its new test used `group_files(..).len()`; the lib test build failed
+  after #349. Fixed in an own adaptation commit (`.groups`). 182 tests green afterwards.
+PR #350 (Jeffrey Wall) - APPLIED as 8225010 (only the README commit; the PR branch also contained
+  #349). Checked the example numbers are self-consistent (5 files/20 B scanned, 2 groups, 3
+  redundant). Note: the example still shows the older log wording "grouping by paths and file
+  identifiers"; harmless, left as authored.
+PR #334 (David Taylor) - APPLIED as 5b910ae + own test commit.
+- Read: new opt-in --ignore-xattr-errors flag threaded through run_script/execute/reflink; only
+  PermissionDenied on individual xattr get/set/remove is skipped, everything else still fails.
+  Only used on the non-Linux reflink path (macOS), Linux reflink keeps the inode and does not
+  touch xattrs. Default behavior unchanged.
+- Verified: cannot run on macOS here. Added a Linux test (trusted.* as non-root -> EPERM):
+  default -> PermissionDenied error; with the flag -> forbidden attr skipped, user.* attr restored.
+  Confirmed with a C probe that this ZFS supports user.* and returns EPERM for trusted.*, so the
+  test is not skipped. All tests green.
+
+PR #339 + #340 + #341 (lovely90133; stacked) - NOT APPLIED.
+- Read: replaces partition()'s per-file filtering with a whole-group validate_group() (regular
+  file, size, mtime and - new, on by default - a full re-hash of every file compared with the
+  group hash from the report); new SkipReason/GroupValidationResult/GroupProcessResult types,
+  dedupe()/run_script()/log_script() signatures changed; #340 adds helper methods + tests; #341 adds
+  a JSON dry-run whose format is silently taken from the *group* run's --format. Explanatory
+  comments in partition()/log_script() deleted.
+- Flagged and verified (built pr/341 in a separate worktree, compared with our build, each binary
+  on its own reports):
+  1. dedupe() splits link/dedupe groups by device and then `return`s after the FIRST partition:
+     a group spanning ZFS + tmpfs produced 1 `ln` instead of 2 (3/3 runs) -> silently drops work.
+  2. Hash validation assumes the report hash is a full-content hash of the raw file. It is not
+     for --skip-content-hash (prefix^suffix), --transform (hash of the transformed output) or
+     hard-link-only groups (hash 0). Verified: --skip-content-hash report of two identical 300 KB
+     files -> "hash does not match", group skipped, 0 files processed (ours: 1).
+  3. Re-reading every file fully before acting doubles the I/O of a dedupe run, enabled by default.
+  4. Coupling of dry-run output format to the group command's --format (#341) is surprising.
+- Decision: reject. The idea (re-validate before acting, issue #84) is good; I address the
+  staleness part of #84 with a narrow ctime check in task 7 instead.
+
+PR #335 (David Taylor) - NOT APPLIED.
+- Read: new CollapseReflinks phase (Linux FIEMAP / macOS F_LOG2PHYS_EXT) that REMOVES files whose
+  full extent map equals another file's from the size groups, unconditionally (no flag).
+- Flagged: (1) default behavior change: reflinked copies disappear from reports, so `remove`/`move`
+  users (who dedupe for tidiness, not space) no longer see those duplicates; (2) replica counting
+  for --isolate / --rf-under / --unique changes: a file present in two roots as reflinks is counted
+  once -> e.g. reported as under-replicated; (3) one FIEMAP ioctl + full extent list per candidate
+  file on every run, also on SSDs where FetchExtents is skipped; (4) cannot be verified here: ZFS
+  in this environment has FICLONE but no FIEMAP and btrfs/XFS are unavailable, so the new phase is a
+  no-op on every filesystem I can test.
+- Decision: reject as-is (unverifiable core + unflagged semantic change). Would be acceptable as
+  an opt-in flag that only affects size statistics / skips already-shared groups for `dedupe`.
+
+PR #317 (Koutheir Attouchi) - NOT APPLIED.
+- Read per commit: dependency major bumps (bytesize 2, byte-unit 5, sysinfo 0.38, rand 0.10,
+  nom 8, ...), edition 2024, MSRV 1.74 -> 1.89, lazy_static -> LazyLock, removal of unused deps,
+  and a 27-file "clippy lints" commit that is stylistic (format-string inlining, #[must_use],
+  let-chains). Checked: it fixes none of the review findings (mklink order, `let _ = lock`, ...
+  unchanged).
+- Flagged: bytesize 2.x changes the human-readable sizes printed in reports/logs, byte-unit 5
+  changes size-argument parsing semantics; MSRV jump; touches every file, so it conflicts with all
+  fixes in this branch.
+- Decision: reject as one unit; dependency updates should be redone separately and deliberately
+  (one crate at a time, with output-format checks).
+
+PR #259 (MustCodeAl) - NOT APPLIED. README shell aliases: `dedupe` alias name shadows the
+  concept/subcommand `fclones dedupe`, `--priority oldest` removes the OLDEST files (surprising for
+  most users), and `2>/dev/null` hides errors (also questioned by the upstream reviewer).
+  Opinionated, not a fix.
+- PR #350 and later: nothing else to apply. Summary task 5: applied #359 #357 #352 #291 #318 #331
+  #348 #349 #350 #334; rejected #339 #340 #341 #335 #317 #259 (reasons above).
+
+Task 6: fix review findings not covered by any PR (2026-11-16)
+Approach per finding: write a regression test, confirm it FAILS without the fix and PASSES with
+it, run the whole suite, add an end-to-end check with the built binary where useful, one commit
+per finding (or per tightly related pair). Commits authored by Christian Fiedler with a
+Co-Authored-By trailer for Claude.
+
+C5 + H7 (lock released immediately; lock needs write access) - FIXED 006a6eb.
+- `let _lock = ..?` keeps the guard alive; Move arm now also propagates lock errors.
+- FileLock: open for write + F_WRLCK; if that fails because the file/fs is read-only (EACCES,
+  EPERM, EROFS) open for read + F_RDLCK (shared lock, still conflicts with cooperating writers).
+- Test test_commands_work_on_read_only_files_with_locking: fails without the lock.rs change
+  ("Failed to open file .. for write: Permission denied"), passes with it.
+- strace end-to-end: F_WRLCK -> unlink -> F_UNLCK (lock now held across the operation).
+- Windows (Wine): dedupe command tests 18/19 pass; the 1 failure (soft link) also fails without
+  this change (Wine symlink limitation) -> not a regression. Related upstream issue: #113.
+H1 (-n/--rf-over panics) - FIXED 1d0fdcf. RangedU64ValueParser::<usize>. Test parses -n for
+  remove/link/dedupe/move and rejects 0; fails without the fix. End-to-end: `remove --dry-run -n 2`
+  on 3 copies removes 1. Fixes upstream issue #302.
+C1 (--in-place --no-copy deletes originals) - FIXED 830680d. Output::InPlace no longer deletes
+  anything (the temp copy is removed by Input::Copied). Tests: no-copy keeps original (fails without
+  the fix), copy mode leaves the tmp dir empty. End-to-end: all files survive `group --transform
+  'touch $IN' --in-place --no-copy`.
+C4 + H2 (transform output truncated; deadlock) - FIXED 05b70d1. hash_transformed hashes the
+  output stream to EOF. Tests with `od`: different inputs sharing an output prefix get different
+  hashes (failed without fix); 200 KB through `od -v` completes (without fix: hung until the 60 s
+  timeout = deadlock reproduced). End-to-end with `gzip -dc`: differing .gz files no longer
+  grouped, identical ones still grouped, no hang.
+H6 (+ upstream issue #320) - FIXED d5e7081. New GroupConfig::report_filter()/reported_rf_over();
+  strict filter applied at the end of group_files(), used for report stats, and passed to the
+  dedupe commands (they took --rf-over 0->1 from transform reports). Tests for --transform
+  singletons and --unique --skip-content-hash both fail without the final filter. End-to-end:
+  #320 scenario now lists only the unique file; `--transform cat --rf-over 2` report -> remove
+  keeps 2 of 3. Also fixes #320, very likely #345 (reporter gave no command line).
+C2 (-S -H remove deletes symlink target) - FIXED 1325d3f. partition() keeps a regular file whose
+  only kept same-inode paths are symlinks; dedupe_script() prefers a regular file as link target.
+  Test covers remove, link (hard) and link --soft with the exact setup; fails without the rule.
+  End-to-end: warning "Keeping b: a symbolic link to it is kept", data intact.
+C3 (report reader trims paths; base dir not unescaped) - FIXED 0a11031. Only the 4-space indent
+  and the line terminator are stripped; `# Base dir:` decoded with from_escaped_string (fallback
+  to raw). Tests: names with leading/trailing space, U+2003, tab; base dir with backslash and
+  trailing space - both fail with the old reader. End-to-end with the review scenario: the
+  unrelated file "a" survives, "a " (the real duplicate) is removed. Fixes upstream issue #275.
+H3 (--max-suffix-size underflow) - FIXED 56430b6. Clamp suffix length to file length. No unit
+  test: whether the suffix stage runs depends on the detected device type (threshold 64 KiB SSD /
+  64 MiB other) which group_files() cannot inject. End-to-end instead (ZFS here = "unknown" kind):
+  two 70 MB files, --max-suffix-size 128MiB: pre-fix debug build panics "attempt to subtract with
+  overflow" (release: EINVAL, seen in the review), fixed build finds the duplicate. Upstream #303.
+H4 (priority top/bottom) - FIXED 1e65bd7. top/bottom are stable sorts by the position in the
+  report. Test with 5 priority combinations; fails with the old reverse()/no-op.
+H5 (arg::split char vs byte offsets) - FIXED 7d2f84f. char_indices(). split(join(args)) round-trip
+  test with umlauts/€/emoji next to $'...' words fails with the old code. End-to-end: the review's
+  --isolate U/Ü scenario now behaves identically.
+H8 (regex anchoring, escaped \$) - FIXED 5f608d9. Wrap a pattern with a top-level `|` in (?:...)
+  (only then, to keep the fixed-prefix directory pruning for other patterns); strip only an
+  unescaped trailing `$`. Test fails with old code. End-to-end: `-x --name '.*\.png|.*\.txt'` no
+  longer matches x.png.bak / y.png.old.
+H9 (--exclude prefix-matches directories) - FIXED b8dcc0a. Directory excluded only on a full
+  match of its path with or without trailing separator. Test (incl. /dev/** still excluding /dev)
+  fails with the old rule. End-to-end: `--exclude '**/foo'` keeps foobar/.
+M1 (--depth off by one) - FIXED fbab8bc. `level >= depth`. Test: depth 1 -> only top-level files,
+  depth 2 -> one level of subdirs; fails with the old check.
+M2 (hidden input paths skipped) - FIXED 46bbdcc. Hidden filter only for level > 0 (entries found
+  while walking). Test with hidden dir and hidden file as input; fails with the old check.
+M3 (.fdignore ignored with .gitignore; nested negation) - FIXED b653959. Both files loaded into one
+  matcher per dir (.fdignore last); stack consulted deepest-first, first explicit match decides.
+  Test (a in .gitignore, b in .fdignore, *.log ignored at root, !keep.log in sub) fails with old code.
+M4 (!(...) extglob) - FIXED 04f84b9 (as "clear error"): cannot be expressed without look-around
+  in the regex crate, so it is now rejected with "negated patterns !(...) are not supported; use
+  --exclude instead" and the rustdoc no longer advertises it (README never listed it). Test added.
+M5 + M6 (transform pre-flight; command parsing) - FIXED 2ab4e36. Program resolved like the OS does
+  (path as given / PATH + PATHEXT) without executing it; no panic on non-UTF-8 names.
+  parse_command keeps a literal `$`, keeps unknown `$NAME`, trims, and errors on unparsed input.
+  Tests: literal-dollar parsing; script outside PATH accepted, missing program rejected. (The old
+  code cannot compile against the new tests because parse_command's signature changed, so
+  before/after was shown end-to-end: absolute script path now accepted; `sed -e s/one$/two/` now
+  works and makes a/b duplicates.) Related upstream issue #288.
+M7 (hard links inflate redundant/reclaimed sizes) - FIXED a596772. FileGroup::redundant_size()
+  counts distinct inodes not reachable from kept files; redundant_count fast path not used with
+  group_by_id; run_script/log_script count freed space per inode only when all its links were
+  processed. Tests for both. End-to-end (3 links + copy, 1000 B): before "Redundant: 3000 B" /
+  "reclaim 3.0 KB", now 1000 B / 1.0 KB. Related upstream issues #268, #257.
+M8 (dry-run scripts) - FIXED 2f0090b. Move scripts start with `mkdir -p <target dir>` (Windows:
+  `if not exist .. mkdir ..`); Windows `mklink [/H] <link> <target>` order fixed. Unix test runs
+  the printed script with `sh -e` (fails without mkdir); Windows test verified under Wine; both fail
+  with the old code. Fixes upstream issue #367.
+M9 (fixed-prefix extraction / partial match) - FIXED 03c3742. Escape flag reset after one char,
+  char-based pop before ?/*/{, char-based truncation in is_partial_match. 3 new tests fail with the
+  old code. Adjusted the existing test_unicode: it asserted `!is_partial_match("ąęść---")` for
+  `^ąęść?`, which only held because of the byte/char bug - the same bug produced false negatives
+  (e.g. "ąęś/" rejected although "ąęś" matches); partial matching may give false positives only.
+M10 (get_mount_point panic) - FIXED 003547f. Returns Option; None when unknown (move then tries
+  rename with copy fallback as before). Test with empty and nested mount lists.
+M11 + upstream issue #84 (mtime-only staleness checks) - FIXED 46f62e8. Dedupe skips groups whose
+  files have ctime (Unix) newer than the report; the hash cache records and compares ctime (new tree
+  `hash_db_v2`, old entries ignored instead of failing to deserialize). Tests for both fail without
+  the change. End-to-end with the exact #84 reproduction (cp -a Z 1 after group, then link): before
+  -> all three files "abcd" (data loss), now the group is skipped with a warning, files intact.
+  Trade-off recorded in the commit: content-preserving operations that change ctime (fclones
+  link/dedupe themselves, chmod, chown) invalidate cache entries and make later dedupe runs skip
+  those groups with a warning. Chosen because a stale cached hash is a data-loss path that the
+  dedupe-time check cannot catch (the file changed before the group run).
+M12 (reflink of files with different sizes) - FIXED aac8ef6. reflink() compares the current
+  sizes and refuses if they differ (reachable with --transform reports where size checks are off;
+  FICLONE could leave the old tail of a larger destination). Linux/transform semantics otherwise
+  unchanged (README does not promise more; with #299 the kernel verifies contents where
+  FIDEDUPERANGE is supported). Updated 2 existing tests that used different-size files: one now
+  uses same-size different-content files with a deterministic expectation (kernel refusal when
+  FIDEDUPERANGE is available on the ioctl path, full clone otherwise), the other expects refusal on
+  every path (it previously expected "too large" to be replaced by "foo" on the non-ioctl path).
+M13 (malformed group header panics) - FIXED 3a6acc7. Errors instead of unwrap(); test with odd-length
+  hash and overflowing numbers fails (panics) with the old parser.
+L1 + L11 + L15 - FIXED 793b9a2 (is_empty inverted assert; StdLog without current_exe; typos,
+  numbered "Fetching extents" phase label, Pattern docs). Test for is_empty.
+L4 - FIXED 7d2668a (quote '~' and '!'; fixes upstream #366). Test fails with old list.
+
+(Work was paused here once because of a usage limit and resumed afterwards.)
+L5 - FIXED 5db34e4. sort_by_cached_key (key computed once per item, each error reported once);
+  doc corrected (failed keys sort first). Test fails with the old sort_by_key.
+L6 - FIXED 3bc7bae. strip_prefix returns None if the base is longer. Test case added.
+L7 - FIXED 0017e6b (Unix part; Windows part = PR #365). from_escaped_string rejects paths
+  decoding to NUL (returns String error now; all callers only format it). End-to-end with a
+  crafted report: old build panics, new build reports "path contains a NUL character".
+L9 - FIXED be849aa. --isolate with --stdin used to be rejected (validation counted positional
+  paths only). It also could not have worked: roots and walk both read stdin, the first reader got
+  everything -> nothing scanned (seen end-to-end). Now validate() skips the count for --stdin,
+  run_group() reads the stdin list once when --isolate is set, and the dedupe commands refuse to
+  rebuild roots from such a report (they would read the report itself as path list) and ask for
+  explicit --isolate roots. End-to-end: group finds the cross-root group; remove without roots ->
+  clear error; with roots -> removes the whole 2/ subgroup.
+L10 - FIXED 3378e9c. read_dir entry errors and file-type errors are logged as warnings. No test
+  (cannot be provoked portably).
+L12 - FIXED ed6f223. RLIM_INFINITY no longer wraps to -1 (clamped). Helper + test. Not changed: a
+  transform child uses ~3 fds per semaphore permit (left as is, documented in the review).
+L13 - FIXED 2e35e75. min(--max-prefix-size, device minimum prefix). Test with --skip-content-hash
+  and 1000-byte prefix. Note: my first "fails without fix" check did not apply because cargo fmt
+  had reformatted the line; re-done against the real old code: the test fails there.
+L14 - FIXED c614bb3. Transform no longer derives Clone (Drop deletes its temp dir).
+L2 + L3 - FIXED bd76f19. --threads removable:N used for removable disks; device-name regex
+  handles multi-letter sd*, vd*, xvd*, mmcblk*. Tests; device-name test fails with the old regex.
+L8 - NOT FIXED (decision): groups decided without reading contents (hard-link-only groups with -H,
+  single files in --unique reports) show hash 0. Consistent existing design; computing a hash only
+  for display would read data for nothing; fclones does not use the field for correctness.
+Task 6 done: all review findings handled (L8 deliberately left). Tests: 221 lib + 4 bin + 2 doc.
+
+Task 7: remaining open issues (2026-11-16)
+Fixed in this task (each with verification as described in its commit):
+- #353 (link/dedupe fail with "File name too long") - FIXED e817f53. Temp name = <name>.<24
+  random> only if it fits 255 bytes, else `.fclones-tmp.<random>` in the same dir. Test with
+  250-char names fails with the old naming.
+- #309 / #336 (RPM owns /usr/bin -> conflict with "filesystem" package) - FIXED 8694181.
+  Verified on the released 0.35.0-2 RPM (`rpm -qlvp`: owns /usr, /usr/bin, /usr/share, ...).
+  Root cause: alien 8.95 in the buster packaging image (fixed in alien 8.95.1, Debian #759533).
+  First attempt (move the image to Debian trixie) was committed and then UNDONE before any push
+  (git reset --soft): a binary built there needs GLIBC_2.39 instead of 2.28 and would not run on
+  Rocky 9 (glibc 2.34), the very users of #309. Final fix: generate the spec with `alien -g`,
+  delete %dir entries of system dirs, rpmbuild with a pinned output name format. Tested the script
+  lines with the real cargo-deb package and injected buster-style %dir lines: RPM contains
+  /usr/bin/fclones and owns only /usr/share/doc/fclones. Not tested: building the Docker image
+  (no Docker here). An attempt to download and run buster's alien 8.95 to reproduce exactly was
+  denied by the environment's permission policy; not worked around.
+- #323 / #337 (startup triggers every automount, hangs on unreachable targets) - FIXED 247268b.
+  sysinfo 0.29 statvfs()s every /proc/mounts entry incl. autofs; sysinfo 0.37 skips autofs but
+  needs Rust 1.88 + API changes (= the kind of upgrade rejected with #317). On Linux the mount
+  table is now read directly (sysinfo's filters + autofs, no statvfs), disk type from
+  /sys/block/*/queue/rotational (ported from sysinfo 0.29, MIT). strace on this machine: 13
+  statfs() calls at startup before, 0 after. Tests: filter with an autofs line; every disk
+  sysinfo reports here appears with identical name/type/fs/removable flag. No autofs available
+  here to test the hang itself.
+- #298 (Windows Hidden attribute ignored) - FIXED f93eed8. FILE_ATTRIBUTE_HIDDEN checked when
+  hidden files are excluded; Windows test via `attrib +h`, run under Wine (fails without the check).
+  The crash in the same issue was fixed by PR #365.
+
+Fixed earlier (task 6 / applied PRs), listed for completeness:
+  #84 (46f62e8), #164 (already in base c0865f5 - can be closed), #275 (0a11031), #288 (2ab4e36),
+  #293 (PR #299 + 936f6bb), #302 (1d0fdcf), #303 (56430b6), #310/#332 (PR #357), #320 and very
+  likely #345 (d5e7081), #333 (PR #334), #347 (PR #349), #351 (PR #359), #364 (PR #365),
+  #366 (7d2668a), #367 (2f0090b), #113 partly (006a6eb: locking no longer blocks read-only files;
+  reflinking into read-only btrfs snapshots still needs FIDEDUPERANGE on a read-only fd, see #299),
+  #268/#257 stats part (a596772).
+
+Not fixed - cannot reproduce here / needs more information:
+- #322 hard-link limit (EMLINK / NTFS 1024 links): needs a filesystem with a low link limit
+  (only ZFS/tmpfs here, no mount capability) and a design change (switch the link target inside a
+  group when the limit is hit). Currently every failing link is rolled back safely (file kept).
+- #250 hard links reported as duplicates (ZFS): not reproducible - on ZFS here, sets of hard links
+  only are not reported; with an extra real copy all paths are listed and counted once (M7 fix).
+  Most likely real copies were present (like #268). Needs the reporter's data.
+- #326 grouping of large files abnormally slow (exFAT on macOS): not reproducible without that setup.
+- #174 PowerShell re-encodes piped output: PowerShell behavior, documented workarounds in the issue.
+- #270 --path '.\' finds nothing on Windows: a path pattern must match whole paths; '.\' does not
+  match files. Not a bug as far as can be determined without more information.
+- #249 Android/termux link creation fails with EACCES: Android storage restriction (also `ln` fails).
+- #324 "flag to ignore errors": fclones already continues after a failed file (warning); the
+  reported failure ("file name too long") is fixed by #353.
+
+Not fixed - feature requests / design decisions (no bug in the current code), left open:
+  #31 #51 #94 #133 #145 #146 #156 #157 #159 #170 #195 #197 #254 #255 #263 #272 #279 #284 #285
+  #286 #287 #292 #300 #301 #305 #307 #311 #313 #314 #315 #316 #319 #321 #325 #327 #330 #354
+  (keep command-line order of roots; the related top/bottom bug H4 is fixed) #355 #356 #358 #368;
+  #253/#258 (`move` keeps >= 1 replica per group by design, so a --unique report moves nothing)
+  and #360 (--unique with --isolate counts replicas per root, by design) would need a decision by
+  the maintainer.
+Questions / documentation / packaging outside this repo (no code change): #192 #230 #251 #262
+  #265 (use --modified-before with a later timestamp to accept future mtimes) #266 #294 #296 #297
+  #308 #361 #362 #363.
+
+Windows test status (cross-compiled, run under Wine)
+- Base a74f90d (+ only the test-build fix): 143 passed, 10 failed.
+- Now: test helper with_dir() canonicalizes with dunce like fclones (7e8d02d) -> fixes 7 Windows
+  failures that were only \\?\ path-prefix mismatches (pre-existing ones and my new tests);
+  Path::file_name() treats the Windows root as having no name (c70ec76), found via the
+  pre-existing failing test. Remaining 4 Windows failures are pre-existing and not code bugs:
+  test_soft_link_command_replaces_file_with_a_link (Wine symlink support), encode_decode_stfu8,
+  pattern add, pattern input_escaping (tests hard-code Unix separators / the Unix escape character).
+- Also fixed a clippy warning in my own test code (c9b6a7e). Remaining clippy warnings are in
+  pre-existing code or in the code of PR #299 (left as authored).
+
+FINAL STATE (2026-11-16)
+- Branch consolidate-upstream; main untouched; nothing pushed. Remote `upstream` added for the PR
+  refs (fetch-only use).
+- Tasks 1-7 done as recorded above.
+- Linux: cargo test 224 lib + 4 bin + 2 doc tests pass; cargo fmt clean.
+- Untracked working files: CLAUDE_REVIEW.md, GOAL.TXT, GOAL.LOG (not committed), and
+  fclones/target/ (test scratch directories created by the existing test helpers when cargo test
+  runs from the package directory).
