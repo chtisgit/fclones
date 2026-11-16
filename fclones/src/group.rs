@@ -2201,7 +2201,7 @@ mod test {
                 };
 
                 // With --isolate, internal duplicates within root 1 and root 2 must not be reported
-                let results = group_files(&config, &log).unwrap();
+                let results = group_files(&config, &log).unwrap().groups;
                 assert_eq!(
                 results.len(),
                 0,
@@ -2210,7 +2210,7 @@ mod test {
 
                 // Scenario 2: Without --isolate, both duplicate groups must be found
                 config.isolate = false;
-                let results = group_files(&config, &log).unwrap();
+                let results = group_files(&config, &log).unwrap().groups;
                 assert_eq!(results.len(), 2);
 
                 // Scenario 3: Relative directory names "1" and "2" from the parent directory
@@ -2220,7 +2220,7 @@ mod test {
                     isolate: true,
                     ..GroupConfig::default()
                 };
-                let results = group_files(&config_from_parent, &log).unwrap();
+                let results = group_files(&config_from_parent, &log).unwrap().groups;
                 assert_eq!(
                 results.len(),
                 0,
@@ -2228,7 +2228,7 @@ mod test {
             );
 
                 config_from_parent.isolate = false;
-                let results = group_files(&config_from_parent, &log).unwrap();
+                let results = group_files(&config_from_parent, &log).unwrap().groups;
                 assert_eq!(results.len(), 2);
             },
         );
