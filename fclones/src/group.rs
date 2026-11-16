@@ -1108,6 +1108,8 @@ fn group_by_suffix(
         FileAccess::Random,
         |(fi, old_hash)| {
             progress.inc(1);
+            // The suffix may be configured (--max-suffix-size) larger than the file.
+            let suffix_len = min(suffix_len, fi.len);
             let chunk = FileChunk::new(&fi.path, fi.len.as_pos() - suffix_len, suffix_len);
             ctx.hasher
                 .hash_file_or_log_err(&chunk, |_| {})
