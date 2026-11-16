@@ -243,14 +243,25 @@ pub fn split(s: &str) -> Result<Vec<Arg>, ParseError> {
     let mut words = Vec::new();
     let mut word = OsString::new();
 
-    let mut pos = 0;
+    // Byte offset of the current character in `s` (not a character count: slicing `s` with a
+    // character count breaks as soon as the input contains multi-byte characters).
+    let mut pos;
     let mut dollar_quote_start = 0;
 
-    let mut chars = s.chars();
+    let mut chars = s.char_indices();
     let mut state = Delimiter;
 
     loop {
-        let c = chars.next();
+        let c = match chars.next() {
+            Some((i, c)) => {
+                pos = i;
+                Some(c)
+            }
+            None => {
+                pos = s.len();
+                None
+            }
+        };
         state = match state {
             Delimiter => match c {
                 None => break,
@@ -368,7 +379,6 @@ pub fn split(s: &str) -> Result<Vec<Arg>, ParseError> {
                 Some(_) => Comment,
             },
         };
-        pos += 1;
     }
 
     Ok(words)
@@ -470,5 +480,24 @@ mod test {
                 Arg::from("arg3-\x7f")
             ]
         )
+    }
+
+    /// Multi-byte characters before or inside a `$'...'` word used to shift the slice of the
+    /// quoted text, because character counts were used as byte offsets. The report header's
+    /// command line is parsed with `split` to rebuild e.g. the --isolate roots.
+    #[test]
+    fn split_join_roundtrip_with_multibyte_chars() {
+        let cases: Vec<Vec<Arg>> = vec![
+            vec!["fclones", "group", "Bücher", "Peter's"],
+            vec!["fclones", "group", "€", "ü's"],
+            vec!["€€€", "a'b€c", "x\ny", "😀'😀"],
+        ]
+        .into_iter()
+        .map(|v| v.into_iter().map(Arg::from).collect())
+        .collect();
+        for args in cases {
+            let joined = super::join(&args);
+            assert_eq!(split(&joined).unwrap(), args, "{joined}");
+        }
     }
 }
