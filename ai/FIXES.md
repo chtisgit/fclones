@@ -84,6 +84,23 @@ Issue #164 was already fixed before this branch (c0865f5) and can be closed.
 - 7e8d02d: the test helper canonicalizes paths with `dunce`, as fclones does. This fixes 7 Windows
   test failures that were only differences in path form.
 - c9b6a7e: fixes a clippy warning in a test.
+- d30854e: fixes the musl release builds, which PR #299 broke (`libc::ioctl` takes a `c_int`
+  request on musl). Found while building v0.36.0.
+
+## Release v0.36.0
+
+Built with `packaging/package-internal.sh`, run directly in this container. The Docker image
+(`packaging/Dockerfile`, Debian trixie) installs the same tools, but it has not been built,
+because there is no Docker here.
+- **glibc build:** `cargo zigbuild --target x86_64-unknown-linux-gnu.2.28` (Zig 0.13.0). The
+  binary needs at most GLIBC_2.28, the same as v0.35.0, and the script checks this.
+- **musl builds:** `cargo zigbuild` for x86_64 and i686.
+- **Windows build:** MinGW.
+- **Maintainer:** the deb Maintainer and RPM Packager are Christian Fiedler
+  (`[package.metadata.deb]`); the copyright file still names the author of fclones.
+- **Checks:** every binary passed a quick check (`group` + `link`; Windows under Wine).
+- **musl tests:** can't be built, because the dev-only dependency `reflink` 0.1 doesn't
+  compile for musl (pre-existing).
 
 ## Test status
 

@@ -1,6 +1,6 @@
 [package]
 name = "fclones"
-version = "0.35.0"
+version = "0.36.0"
 description = "Finds and removes duplicate files"
 authors = ["Piotr Kołaczkowski <pkolaczk@gmail.com>"]
 homepage = "https://github.com/pkolaczk/fclones"
