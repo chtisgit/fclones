@@ -39,7 +39,8 @@ impl Regex {
     /// in the fixed prefix of the regex, where fixed prefix are all characters up to the
     /// first regex wildcard.
     pub fn is_partial_match(&self, s: &str) -> bool {
-        let len = min(s.len(), self.fixed_prefix.len());
+        // Compare characters, not bytes: lengths in bytes and in chars differ for non-ASCII.
+        let len = min(s.chars().count(), self.fixed_prefix.chars().count());
         let truncated: String = s.chars().take(len).collect();
         let pattern = if self.case_insensitive {
             truncated.to_lowercase()
@@ -60,27 +61,31 @@ impl Regex {
             if c == '^' && i == 0 {
                 continue;
             }
-            if magic_chars.contains(&c) && !escape {
-                break;
+            if escape {
+                escape = false;
+                // an escaped alphanumeric character means a character class (\d, \w, ...)
+                // or another special sequence, so let's stop here
+                if c.is_ascii_alphanumeric() {
+                    break;
+                }
+                // any other escaped character is a literal
+                result.push(c);
+                continue;
             }
-            // these may make the previous character optional,
-            // so we erase the last added one
-            if ['?', '*'].contains(&c) && !escape {
-                result = result.chars().take(result.len() - 1).collect();
-                break;
-            }
-            // escaped alphabetic character means a character class,
-            // so let's stop here as well
-            if c.is_ascii_alphabetic() && escape {
-                break;
-            }
-
-            // we\re not adding the escape char to the output, because the output is not a regexp
+            // we're not adding the escape char to the output, because the output is not a regexp
             if c == '\\' {
                 escape = true;
                 continue;
             }
-
+            // these may make the previous character optional,
+            // so we erase the last added one
+            if ['?', '*', '{'].contains(&c) {
+                result.pop();
+                break;
+            }
+            if magic_chars.contains(&c) {
+                break;
+            }
             result.push(c);
         }
 
@@ -136,7 +141,11 @@ mod test {
         assert!(r.is_partial_match("ąę"));
         assert!(r.is_partial_match("ąęś"));
         assert!(r.is_partial_match("ąęść"));
-        assert!(!r.is_partial_match("ąęść---"));
+        // `ć` is optional, so "ąęś" followed by anything else may still be a prefix of a match
+        // (false positives are allowed; this used to be a false negative):
+        assert!(r.is_partial_match("ąęś/"));
+        assert!(!r.is_partial_match("ąęx"));
+        assert!(!r.is_partial_match("x"));
     }
 
     #[test]
@@ -145,5 +154,36 @@ mod test {
         assert!(r.is_partial_match("."));
         assert!(r.is_partial_match(".*"));
         assert!(!r.is_partial_match("foo"));
+    }
+
+    /// The escape flag used to stay set after the first escaped character, so later regex
+    /// syntax was copied into the "fixed" prefix and matching directories were pruned.
+    #[test]
+    fn test_fixed_prefix_after_escaped_char() {
+        assert_eq!(
+            Regex::get_fixed_prefix("^/srv/1\\.0/[^/]*/x/[^/]*$"),
+            "/srv/1.0/"
+        );
+        let r = Regex::new("^/srv/1\\.0/[^/]*/x/[^/]*$", false).unwrap();
+        assert!(r.is_partial_match("/srv/1.0/sub/"));
+    }
+
+    /// Quantifiers that make the previous character optional remove it from the prefix,
+    /// also for multi-byte characters.
+    #[test]
+    fn test_fixed_prefix_with_optional_chars() {
+        assert_eq!(Regex::get_fixed_prefix("^ab?"), "a");
+        assert_eq!(Regex::get_fixed_prefix("^h\u{fc}?"), "h");
+        assert_eq!(Regex::get_fixed_prefix("^ab{0,1}c"), "a");
+        assert!(Regex::new("^ab{0}c", false).unwrap().is_partial_match("ac"));
+    }
+
+    /// Prefix comparison must count characters, not bytes.
+    #[test]
+    fn test_partial_match_with_multibyte_chars() {
+        let r = Regex::new("^/home/\u{fc}ser/x", false).unwrap();
+        assert!(r.is_partial_match("/home/\u{fc}ser/x/sub/"));
+        assert!(r.is_partial_match("/home/\u{fc}s"));
+        assert!(!r.is_partial_match("/home/\u{fc}ser/y/"));
     }
 }
