@@ -859,6 +859,9 @@ fn partition(
         }
     }
 
+    // Position of each file in the report, for the `top` and `bottom` priorities.
+    let position: HashMap<Path, usize> = files.iter().map(|f| f.path.clone()).zip(0..).collect();
+
     let mut file_sub_groups =
         FileSubGroup::group(files, &config.isolated_roots, !config.match_links);
 
@@ -866,9 +869,19 @@ fn partition(
     // The priorities at the beginning of the argument list have precedence over
     // the priorities given at the end of the argument list, therefore we're applying
     // them in reversed order.
+    // `top` and `bottom` must be stable sorts by the position in the report, like the other
+    // priorities are stable sorts by their key. Reversing the vector (or doing nothing) would
+    // instead invert or keep whatever order the previously applied priority established.
     let mut sort_errors = Vec::new();
+    let first_position = |g: &FileSubGroup<PathAndMetadata>| {
+        g.files.iter().map(|f| position[&f.path]).min().unwrap_or(0)
+    };
     for priority in config.priority.iter().rev() {
-        sort_errors.extend(sort_by_priority(&mut file_sub_groups, priority));
+        match priority {
+            Priority::Top => file_sub_groups.sort_by_key(|g| Reverse(first_position(g))),
+            Priority::Bottom => file_sub_groups.sort_by_key(first_position),
+            _ => sort_errors.extend(sort_by_priority(&mut file_sub_groups, priority)),
+        }
     }
 
     if !sort_errors.is_empty() {
@@ -1411,6 +1424,49 @@ mod test {
                 path_set(&partitioned_2.to_drop)
             );
         });
+    }
+
+    /// `top`/`bottom` combined with another priority: the first priority decides, the second
+    /// only breaks ties. They used to be implemented as reverse()/no-op, which inverted or
+    /// ignored them as soon as another priority was given.
+    #[test]
+    fn test_partition_top_and_bottom_combined_with_other_priorities() {
+        with_dir("dedupe/partition/top_bottom", |root| {
+            // Listed a, b, c; a is the most recently modified, c the least recently.
+            let paths = ["a", "b", "c"].map(|n| root.join(n));
+            for (i, p) in paths.iter().enumerate() {
+                write_file(p, "aaa");
+                let mtime = filetime::FileTime::from_unix_time(1_600_000_000 - 1000 * i as i64, 0);
+                filetime::set_file_mtime(p, mtime).unwrap();
+            }
+            let dropped = |priority: Vec<Priority>| {
+                let group = FileGroup {
+                    file_len: FileLen(3),
+                    file_hash: FileHash::from_str("00").unwrap(),
+                    files: paths.iter().map(|p| Path::from(p)).collect(),
+                }
+                .map(|p| PathAndMetadata::new(p).unwrap());
+                let config = DedupeConfig {
+                    priority,
+                    ..DedupeConfig::default()
+                };
+                let mut names: Vec<String> = partition(group, &config, &StdLog::new())
+                    .unwrap()
+                    .to_drop
+                    .iter()
+                    .map(|f| f.path.file_name().unwrap().to_string_lossy().to_string())
+                    .collect();
+                names.sort();
+                names
+            };
+            use Priority::*;
+            assert_eq!(dropped(vec![Top]), ["a", "b"]);
+            assert_eq!(dropped(vec![Top, MostRecentlyModified]), ["a", "b"]);
+            assert_eq!(dropped(vec![Bottom]), ["b", "c"]);
+            assert_eq!(dropped(vec![Bottom, MostRecentlyModified]), ["b", "c"]);
+            // The second priority must still work as a tie breaker:
+            assert_eq!(dropped(vec![MostRecentlyModified, Top]), ["a", "b"]);
+        })
     }
 
     #[test]
