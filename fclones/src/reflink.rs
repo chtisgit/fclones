@@ -816,6 +816,45 @@ pub mod test {
         });
     }
 
+    /// Restoring an extended attribute the process is not allowed to set must fail by default
+    /// and be skipped with `ignore_xattr_errors` (upstream PR #334). On Linux, setting a
+    /// `trusted.*` attribute without CAP_SYS_ADMIN fails with EPERM, the same error class as
+    /// `com.apple.provenance` on macOS.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_restore_xattrs_ignores_permission_errors_only_when_asked() {
+        if unsafe { libc::geteuid() } == 0 {
+            return; // root may set trusted.* attributes
+        }
+        with_dir("dedupe/xattr_permission", |root| {
+            let path = root.join("file");
+            write_file(&path, "content");
+            if xattr::set(&path, "user.fclones_probe", b"1").is_err() {
+                return; // filesystem without user xattr support
+            }
+            let attrs = || {
+                vec![
+                    XAttr {
+                        name: "trusted.fclones_test".into(),
+                        value: Some(b"x".to_vec()),
+                    },
+                    XAttr {
+                        name: "user.fclones_kept".into(),
+                        value: Some(b"y".to_vec()),
+                    },
+                ]
+            };
+            let err = restore_xattrs(&path, attrs(), false).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::PermissionDenied, "{err}");
+
+            restore_xattrs(&path, attrs(), true).unwrap();
+            assert_eq!(
+                xattr::get(&path, "user.fclones_kept").unwrap(),
+                Some(b"y".to_vec())
+            );
+        });
+    }
+
     // Test that FICLONE overwrites a file even when content is different (unsafe behavior)
     #[test]
     #[cfg(any(target_os = "linux", target_os = "android"))]
