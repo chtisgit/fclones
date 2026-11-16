@@ -79,9 +79,20 @@ impl Pattern {
     /// Creates `Pattern` instance from raw regular expression. Supports PCRE syntax.
     /// Allows to specify case sensitivity
     pub fn regex_with(pattern: &str, opts: &PatternOpts) -> Result<Pattern, PatternError> {
-        let pattern = pattern.trim_start_matches('^');
-        let pattern = pattern.trim_end_matches('$');
-        let pattern = pattern.to_string();
+        // Remove the anchors, we add our own. Only an unescaped trailing `$` is an anchor;
+        // `\$` matches a literal dollar sign and must be kept.
+        let pattern = pattern.strip_prefix('^').unwrap_or(pattern);
+        let pattern = match pattern.strip_suffix('$') {
+            Some(p) if p.chars().rev().take_while(|&c| c == '\\').count() % 2 == 0 => p,
+            _ => pattern,
+        };
+        // `^a|b$` would mean "starts with a or ends with b": group a top-level alternation
+        // so that the anchors apply to all alternatives (and concatenation keeps working).
+        let pattern = if has_top_level_alternation(pattern) {
+            format!("(?:{pattern})")
+        } else {
+            pattern.to_string()
+        };
 
         let anchored_regex = "^".to_string() + &pattern + "$";
         let anchored_regex = Regex::new(anchored_regex.as_str(), opts.case_insensitive);
@@ -279,6 +290,42 @@ impl Pattern {
         let mut parse_all = map(many0(p_token), |s| s.join(""));
         (parse_all)(glob)
     }
+}
+
+/// Returns true if the regular expression contains a `|` outside of any group or character class.
+fn has_top_level_alternation(regex: &str) -> bool {
+    let mut depth = 0usize;
+    let mut chars = regex.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                chars.next();
+            }
+            '[' => {
+                // Skip the character class. `]` right after `[` or `[^` is a literal.
+                if chars.peek() == Some(&'^') {
+                    chars.next();
+                }
+                if chars.peek() == Some(&']') {
+                    chars.next();
+                }
+                while let Some(c) = chars.next() {
+                    match c {
+                        '\\' => {
+                            chars.next();
+                        }
+                        ']' => break,
+                        _ => {}
+                    }
+                }
+            }
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            '|' if depth == 0 => return true,
+            _ => {}
+        }
+    }
+    false
 }
 
 impl Add<Pattern> for Pattern {
@@ -507,5 +554,33 @@ mod test {
         assert!(g1.matches_prefix(native_dir_sep("/a/b/c").as_str()));
         assert!(g1.matches_prefix(native_dir_sep("/a/b/z/foo").as_str()));
         assert!(!g1.matches_prefix(native_dir_sep("/a/c/z/foo").as_str()));
+    }
+
+    /// Anchoring must apply to every alternative: `^a|b$` would mean "starts with a or ends
+    /// with b". An escaped `\$` is a literal dollar sign, not an anchor to strip.
+    #[test]
+    fn regex_anchoring() {
+        let p = Pattern::regex(".*\\.png|.*\\.txt").unwrap();
+        assert!(p.matches("a.png"));
+        assert!(p.matches("b.txt"));
+        assert!(!p.matches("x.png.bak"));
+        assert!(!p.matches("y.txt.old"));
+
+        let p = Pattern::regex("^a|b$").unwrap();
+        assert!(p.matches("a") && p.matches("b"));
+        assert!(!p.matches("ab") && !p.matches("xb") && !p.matches("ax"));
+
+        let p = Pattern::regex("foo\\$").unwrap();
+        assert!(p.matches("foo$"));
+        assert!(!p.matches("foo$bar"));
+
+        let p = Pattern::regex("a[|]b").unwrap();
+        assert!(p.matches("a|b"));
+        assert!(!p.matches("a"));
+
+        // concatenation, as done for relative --path patterns
+        let p = Pattern::literal("/base/") + Pattern::regex("x|y").unwrap();
+        assert!(p.matches("/base/y"));
+        assert!(!p.matches("y"));
     }
 }
