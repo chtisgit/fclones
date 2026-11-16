@@ -157,6 +157,9 @@ impl Path {
             self_components.next();
             base_components.next();
         }
+        if base_components.peek().is_some() {
+            return None; // base is longer than self, so it is not a prefix
+        }
         Some(Path::make(self_components))
     }
 
@@ -499,6 +502,11 @@ mod test {
         );
         assert_eq!(
             Path::from("/foo/bar").strip_prefix(&Path::from("/bar")),
+            None
+        );
+        // a longer base is not a prefix (used to return Some("."))
+        assert_eq!(
+            Path::from("/foo").strip_prefix(&Path::from("/foo/bar")),
             None
         );
     }
