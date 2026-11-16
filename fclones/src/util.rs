@@ -16,14 +16,15 @@ where
 }
 
 /// Sorts an array using a key generation function that can fail.
-/// Items for which the key could not be obtained are sorted last.
+/// Items for which the key could not be obtained are sorted first.
+/// The key is computed once per item (so each error is reported once).
 /// Returns vector of errors encountered when obtaining the keys.
 pub fn try_sort_by_key<T, K, E>(v: &mut [T], f: impl Fn(&T) -> Result<K, E>) -> Vec<E>
 where
     K: Ord,
 {
     let mut errors: Vec<E> = Vec::new();
-    v.sort_by_key(|t| f(t).map_err(|e| errors.push(e)).ok());
+    v.sort_by_cached_key(|t| f(t).map_err(|e| errors.push(e)).ok());
     errors
 }
 
@@ -180,6 +181,14 @@ pub mod test {
             }
             FsSupportsReflink::Supported(val) => val,
         }
+    }
+
+    #[test]
+    fn try_sort_by_key_reports_each_error_once() {
+        let mut v = vec![5, -1, 3, -2, 4, 1, 2];
+        let errors = try_sort_by_key(&mut v, |x| if *x < 0 { Err(*x) } else { Ok(*x) });
+        assert_eq!(errors.len(), 2);
+        assert_eq!(&v[2..], &[1, 2, 3, 4, 5]); // failed keys (None) sort first
     }
 
     #[test]
