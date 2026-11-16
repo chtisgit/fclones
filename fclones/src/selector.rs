@@ -73,15 +73,23 @@ impl PathSelector {
     pub fn matches_dir(&self, path: &Path) -> bool {
         self.with_absolute_path(path, |path| {
             let mut path = path.to_string_lossy();
+            let without_sep = path.trim_end_matches(MAIN_SEPARATOR).to_string();
             if !path.ends_with(MAIN_SEPARATOR) {
                 path.push(MAIN_SEPARATOR);
             }
+            // A directory is excluded if an exclude pattern matches the whole directory path,
+            // with or without the trailing separator (`/dev/**` matches "/dev/", `**/foo`
+            // matches "/x/foo"). Matching only a prefix of the path would also exclude
+            // "/x/foobar" for `**/foo`.
             (self.included_paths.is_empty()
                 || self
                     .included_paths
                     .iter()
                     .any(|p| p.matches_partially(&path)))
-                && self.excluded_paths.iter().all(|p| !p.matches_prefix(&path))
+                && self
+                    .excluded_paths
+                    .iter()
+                    .all(|p| !p.matches(&path) && !p.matches(&without_sep))
         })
     }
 
@@ -241,5 +249,22 @@ mod test {
 
         assert!(!selector.matches_dir(&Path::from("/test3/foo")));
         assert!(!selector.matches_dir(&Path::from("/test3/foo/bar/baz")));
+    }
+
+    /// An exclude pattern must match the whole directory path, not just a prefix of it:
+    /// `**/foo` used to exclude "/x/foobar" too.
+    #[test]
+    fn exclude_dir_requires_full_match() {
+        let selector = PathSelector::new(Path::from("/"))
+            .exclude_paths(vec![Pattern::glob("**/foo").unwrap()]);
+        assert!(!selector.matches_dir(&Path::from("/x/foo")));
+        assert!(selector.matches_dir(&Path::from("/x/foobar")));
+        assert!(selector.matches_dir(&Path::from("/x/foo.d")));
+
+        let selector = PathSelector::new(Path::from("/"))
+            .exclude_paths(vec![Pattern::glob("/dev/**").unwrap()]);
+        assert!(!selector.matches_dir(&Path::from("/dev")));
+        assert!(!selector.matches_dir(&Path::from("/dev/shm")));
+        assert!(selector.matches_dir(&Path::from("/devices")));
     }
 }
