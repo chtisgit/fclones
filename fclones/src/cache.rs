@@ -62,7 +62,7 @@ impl HashCache {
     ) -> Result<HashCache, Error> {
         create_dir_all(database_path.to_path_buf()).map_err(|e| {
             format!(
-                "Count not create hash database directory {}: {}",
+                "Could not create hash database directory {}: {}",
                 database_path.to_escaped_string(),
                 e
             )

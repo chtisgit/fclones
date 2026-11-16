@@ -912,9 +912,10 @@ fn atomic_counter_vec(len: usize) -> Vec<std::sync::atomic::AtomicU32> {
 #[cfg(target_os = "linux")]
 fn update_file_locations(ctx: &GroupCtx<'_>, groups: &mut (impl FileCollection + ?Sized)) {
     let count = groups.count();
-    let progress = ctx
-        .log
-        .progress_bar("Fetching extents", ProgressBarLength::Items(count as u64));
+    let progress = ctx.log.progress_bar(
+        &ctx.phases.format(Phase::FetchExtents),
+        ProgressBarLength::Items(count as u64),
+    );
 
     let err_counters = atomic_counter_vec(ctx.devices.len());
     groups.for_each_mut(|fi| {

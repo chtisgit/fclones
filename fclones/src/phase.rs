@@ -15,7 +15,7 @@ impl Phase {
     pub fn name(&self) -> &'static str {
         match self {
             Phase::Walk => "Scanning files",
-            Phase::FetchExtents => "Fetching extends",
+            Phase::FetchExtents => "Fetching extents",
             Phase::GroupBySize => "Grouping by size",
             Phase::GroupByPrefix => "Grouping by prefix",
             Phase::GroupBySuffix => "Grouping by suffix",

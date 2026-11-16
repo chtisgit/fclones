@@ -72,12 +72,11 @@ impl StdLog {
     pub fn new() -> StdLog {
         StdLog {
             progress_bar: Mutex::new(Weak::default()),
+            // current_exe() can fail (e.g. without /proc); logging must not panic because of that
             program_name: std::env::current_exe()
-                .unwrap()
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .to_string(),
+                .ok()
+                .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+                .unwrap_or_else(|| "fclones".to_string()),
             log_stderr_to_stdout: false,
             no_progress: false,
         }

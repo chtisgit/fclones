@@ -116,14 +116,14 @@ impl Pattern {
         }
     }
 
-    /// Creates a `Pattern` that matches literal string. Case insensitive.
+    /// Creates a `Pattern` that matches literal string. Case sensitive.
     /// Special characters in the string are escaped before creating the underlying regex.
     pub fn literal(s: &str) -> Pattern {
         Self::regex(escape(s).as_str()).unwrap()
     }
 
     /// Creates `Pattern` instance from a Unix extended glob.
-    /// Case insensitive. For syntax reference see [glob_with](glob_with).
+    /// Case sensitive. For syntax reference see [glob_with](glob_with).
     pub fn glob(pattern: &str) -> Result<Pattern, PatternError> {
         Self::glob_with(pattern, &PatternOpts::default())
     }

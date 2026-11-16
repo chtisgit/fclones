@@ -308,8 +308,7 @@ impl DiskDevices {
 
     /// Always returns false, because the default device is guaranteed to exist
     pub fn is_empty(&self) -> bool {
-        assert!(self.devices.is_empty());
-        false
+        self.devices.is_empty()
     }
 
     /// Returns an iterator over devices
@@ -347,6 +346,7 @@ mod test {
     #[test]
     fn mount_point_lookup() {
         let mut devices = DiskDevices::single(DiskKind::SSD, 1);
+        assert!(!devices.is_empty()); // used to panic: the assertion was inverted
         devices.mount_points.clear();
         assert_eq!(devices.get_mount_point(&Path::from("/a/b")), None);
 
