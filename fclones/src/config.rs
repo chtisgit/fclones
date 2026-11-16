@@ -622,7 +622,7 @@ pub struct DedupeConfig {
     /// `--rf-over` value in the earlier `fclones group` run.
     #[arg(
         short = 'n', long, value_name = "COUNT",
-        value_parser = clap::value_parser!(u64).range(1..)
+        value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..)
     )]
     pub rf_over: Option<usize>,
 
@@ -822,6 +822,25 @@ mod test {
     fn test_remove_command() {
         let config: Config = Config::try_parse_from(vec!["fclones", "remove"]).unwrap();
         assert_matches!(config.command, Command::Remove { .. });
+    }
+
+    /// `-n` / `--rf-over` of the dedupe commands used to panic in clap
+    /// ("Mismatch between definition and access of `rf_over`", upstream issue #302).
+    #[test]
+    fn test_dedupe_commands_accept_rf_over() {
+        for cmd in ["remove", "link", "dedupe"] {
+            let config = Config::try_parse_from(vec!["fclones", cmd, "-n", "2"]).unwrap();
+            let rf_over = match config.command {
+                Command::Remove(c) => c.rf_over,
+                Command::Link { config, .. } | Command::Dedupe { config } => config.rf_over,
+                _ => unreachable!(),
+            };
+            assert_eq!(rf_over, Some(2));
+        }
+        let config =
+            Config::try_parse_from(vec!["fclones", "move", "--rf-over", "3", "target"]).unwrap();
+        assert_matches!(config.command, Command::Move { config, .. } if config.rf_over == Some(3));
+        assert!(Config::try_parse_from(vec!["fclones", "remove", "-n", "0"]).is_err());
     }
 
     #[test]
