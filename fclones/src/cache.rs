@@ -31,6 +31,8 @@ impl Display for Key {
 #[derive(Debug, Serialize, Deserialize)]
 struct CachedFileInfo {
     modified_timestamp_ms: u64,
+    /// Status change time (seconds, nanoseconds); (0, 0) where not available.
+    changed_timestamp: (i64, i64),
     file_len: FileLen,
     data_len: FileLen,
     hash: FileHash,
@@ -73,7 +75,13 @@ impl HashCache {
             )
         })?;
 
-        let tree_id = format!("hash_db:{:?}:{}", algorithm, transform.unwrap_or("<none>"));
+        // v2: entries also record the status change time. Entries written by older versions
+        // have a different format and live in the old tree, which is not used anymore.
+        let tree_id = format!(
+            "hash_db_v2:{:?}:{}",
+            algorithm,
+            transform.unwrap_or("<none>")
+        );
         let cache = Arc::new(typed_sled::Tree::open(&db, tree_id));
         let flusher = HashCacheFlusher::start(&cache);
         Ok(HashCache { cache, flusher })
@@ -103,6 +111,7 @@ impl HashCache {
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or(Duration::ZERO)
                 .as_millis() as u64,
+            changed_timestamp: changed_timestamp(file),
             file_len: file.len(),
             data_len,
             hash,
@@ -145,7 +154,10 @@ impl HashCache {
             .unwrap_or(Duration::ZERO)
             .as_millis() as u64;
 
-        if value.modified_timestamp_ms != modified || value.file_len != metadata.len() {
+        if value.modified_timestamp_ms != modified
+            || value.changed_timestamp != changed_timestamp(metadata)
+            || value.file_len != metadata.len()
+        {
             Ok(None) // found in cache, but the file has changed since it was cached
         } else {
             Ok(Some((value.data_len, value.hash)))
@@ -171,6 +183,22 @@ impl HashCache {
             .flush()
             .map_err(|e| format!("Failed to flush cache: {e}"))?;
         Ok(())
+    }
+}
+
+/// Returns the status change time (ctime) of the file. Unlike the modification time, it cannot
+/// be set by the user or preserved by tools like `cp -a`, so a content change is detected even if
+/// the modification time was restored.
+fn changed_timestamp(metadata: &FileMetadata) -> (i64, i64) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        (metadata.ctime(), metadata.ctime_nsec())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        (0, 0)
     }
 }
 
@@ -248,6 +276,36 @@ mod test {
             let cached_hash = cache.get(&key, &metadata).unwrap();
 
             assert_eq!(cached_hash, Some((data_len, orig_hash)))
+        });
+    }
+
+    /// A content change that preserves the length and the modification time (cp -a, touch -r,
+    /// rsync -t) must invalidate the cached hash: on Unix the status change time is checked.
+    #[test]
+    #[cfg(unix)]
+    fn return_none_if_file_changed_but_mtime_was_restored() {
+        with_dir("cache/return_none_if_mtime_restored", |root| {
+            let file = root.join("file");
+            std::fs::write(&file, "aaaa").unwrap();
+            let mtime =
+                filetime::FileTime::from_last_modification_time(&std::fs::metadata(&file).unwrap());
+            let path = Path::from(&file);
+            let metadata = FileMetadata::new(&path).unwrap();
+            let chunk = FileChunk::new(&path, FilePos(0), FileLen(4));
+            let cache_path = Path::from(root.join("cache"));
+            let cache = HashCache::open(&cache_path, None, HashFn::Metro).unwrap();
+            let key = cache.key(&chunk, &metadata).unwrap();
+            cache
+                .put(&key, &metadata, chunk.len, FileHash::from(12345))
+                .unwrap();
+
+            // change the content, keep length and mtime
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            std::fs::write(&file, "bbbb").unwrap();
+            filetime::set_file_mtime(&file, mtime).unwrap();
+
+            let metadata = FileMetadata::new(&path).unwrap();
+            assert_eq!(cache.get(&key, &metadata).unwrap(), None);
         });
     }
 

@@ -525,6 +525,21 @@ impl AddAssign for DedupeResult {
     }
 }
 
+/// Returns the time of the last status change (ctime) of the file.
+/// Returns `None` on systems without a status change time.
+fn status_change_time(metadata: &FileMetadata) -> Option<DateTime<Local>> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        DateTime::from_timestamp(metadata.ctime(), metadata.ctime_nsec() as u32).map(Into::into)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        None
+    }
+}
+
 /// Returns true if any of the files have been modified after the given timestamp.
 /// Also returns true if file timestamp could not be read.
 fn was_modified(files: &[PathAndMetadata], after: DateTime<FixedOffset>, log: &dyn Log) -> bool {
@@ -539,6 +554,11 @@ fn was_modified(files: &[PathAndMetadata], after: DateTime<FixedOffset>, log: &d
         match m.modified() {
             Ok(file_timestamp) => {
                 let file_timestamp: DateTime<Local> = file_timestamp.into();
+                // The modification time can be set to anything by the user or by tools that
+                // preserve it (cp -a, rsync -t, touch -r), so on Unix also check the status
+                // change time, which is updated whenever the file content is changed.
+                let file_timestamp =
+                    status_change_time(m).map_or(file_timestamp, |c| max(file_timestamp, c));
                 if file_timestamp > after {
                     log.warn(format!(
                         "File {} was updated after {} (at {})",
@@ -1451,6 +1471,30 @@ mod test {
             };
             let partitioned = partition(group, &config, &StdLog::new());
             assert!(partitioned.is_err());
+        })
+    }
+
+    /// Upstream issue #84: a file whose content was replaced after `fclones group` while its
+    /// modification time was preserved (`cp -a`) must not be removed or linked.
+    #[test]
+    #[cfg(unix)]
+    fn test_partition_bails_out_if_file_changed_with_preserved_mtime() {
+        with_dir("dedupe/partition/preserved_mtime", |root| {
+            let group = make_group(root, FileHash::from_str("00").unwrap());
+            let file = group.files[1].to_path_buf();
+            let mtime =
+                filetime::FileTime::from_last_modification_time(&fs::metadata(&file).unwrap());
+            let report_time = Local::now();
+            thread::sleep(time::Duration::from_millis(20));
+            write_file(&file, "");
+            filetime::set_file_mtime(&file, mtime).unwrap();
+
+            let group = group.map(|p| PathAndMetadata::new(p).unwrap());
+            let config = DedupeConfig {
+                modified_before: Some(DateTime::from(report_time)),
+                ..DedupeConfig::default()
+            };
+            assert!(partition(group, &config, &StdLog::new()).is_err());
         })
     }
 
