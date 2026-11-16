@@ -96,7 +96,10 @@ impl Drop for Output {
         let _ = match self {
             Output::StdOut => Ok(()),
             Output::Named(target) => std::fs::remove_file(target),
-            Output::InPlace(target) => std::fs::remove_file(target),
+            // The in-place output is the input file itself: either the temporary copy, which
+            // is removed by `Input::Copied`, or - with `--no-copy` - the user's original file,
+            // which must never be deleted.
+            Output::InPlace(_) => Ok(()),
         };
     }
 }
@@ -484,6 +487,46 @@ mod test {
             let result = hasher.hash_transformed(&chunk, |_| {}).unwrap();
             assert_eq!(result.0, FileLen(content.len() as u64));
             assert_eq!(result.1, good_file_hash);
+        })
+    }
+
+    /// `--in-place --no-copy` lets the transform work on the original file. fclones must read
+    /// the result but never delete the original (it used to delete every scanned file).
+    #[test]
+    #[cfg(unix)]
+    fn in_place_without_copy_keeps_original_file() {
+        with_dir("target/test/transform/in_place_no_copy/", |root| {
+            let mut transform = Transform::new(String::from("touch $IN"), true).unwrap();
+            transform.copy = false;
+            let input_path = root.join("input.txt");
+            std::fs::write(&input_path, b"content").unwrap();
+
+            let log = StdLog::default();
+            let hasher = FileHasher::new(HashFn::default(), Some(transform), &log);
+            let path = Path::from(&input_path);
+            let chunk = FileChunk::new(&path, FilePos(0), FileLen(7));
+            hasher.hash_transformed(&chunk, |_| {}).unwrap();
+            assert_eq!(std::fs::read(&input_path).unwrap(), b"content");
+        })
+    }
+
+    /// With the default copy, the temporary copy is removed and the original is kept.
+    #[test]
+    #[cfg(unix)]
+    fn in_place_with_copy_removes_only_the_temporary_copy() {
+        with_dir("target/test/transform/in_place_copy/", |root| {
+            let transform = Transform::new(String::from("touch $IN"), true).unwrap();
+            let tmp_dir = transform.tmp_dir.clone();
+            let input_path = root.join("input.txt");
+            std::fs::write(&input_path, b"content").unwrap();
+
+            let log = StdLog::default();
+            let hasher = FileHasher::new(HashFn::default(), Some(transform), &log);
+            let path = Path::from(&input_path);
+            let chunk = FileChunk::new(&path, FilePos(0), FileLen(7));
+            hasher.hash_transformed(&chunk, |_| {}).unwrap();
+            assert!(input_path.exists());
+            assert_eq!(std::fs::read_dir(&tmp_dir).unwrap().count(), 0);
         })
     }
 
