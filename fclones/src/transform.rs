@@ -490,6 +490,48 @@ mod test {
         })
     }
 
+    /// The whole transformed output must be hashed, not only as many bytes as the input file
+    /// has: `od` output is ~4x longer than its input, and these two inputs only differ in the
+    /// last byte, which appears in the output after the first `input.len()` bytes.
+    #[test]
+    #[cfg(unix)]
+    fn hashes_whole_output_of_expanding_transform() {
+        with_dir("target/test/transform/expanding/", |root| {
+            let log = StdLog::default();
+            let transform = Transform::new(String::from("od"), false).unwrap();
+            let hasher = FileHasher::new(HashFn::default(), Some(transform), &log);
+            let hash = |name: &str, content: &[u8]| {
+                let path = root.join(name);
+                std::fs::write(&path, content).unwrap();
+                let path = Path::from(&path);
+                let chunk = FileChunk::new(&path, FilePos(0), FileLen(content.len() as u64));
+                hasher.hash_transformed(&chunk, |_| {}).unwrap()
+            };
+            let (len_x, hash_x) = hash("x", b"aaaaaaaaaaaaaaaaX");
+            let (_, hash_y) = hash("y", b"aaaaaaaaaaaaaaaaY");
+            assert!(len_x.0 > 17, "the whole od output must be read");
+            assert_ne!(hash_x, hash_y);
+        })
+    }
+
+    /// A transform whose output exceeds the input length by more than the pipe buffer used to
+    /// deadlock: fclones stopped reading and waited for the child, which blocked on write().
+    #[test]
+    #[cfg(unix)]
+    fn large_expanding_transform_does_not_deadlock() {
+        with_dir("target/test/transform/expanding_large/", |root| {
+            let log = StdLog::default();
+            let transform = Transform::new(String::from("od -v"), false).unwrap();
+            let hasher = FileHasher::new(HashFn::default(), Some(transform), &log);
+            let path = root.join("big");
+            std::fs::write(&path, vec![7u8; 200_000]).unwrap();
+            let path = Path::from(&path);
+            let chunk = FileChunk::new(&path, FilePos(0), FileLen(200_000));
+            let (len, _) = hasher.hash_transformed(&chunk, |_| {}).unwrap();
+            assert!(len.0 > 200_000);
+        })
+    }
+
     /// `--in-place --no-copy` lets the transform work on the original file. fclones must read
     /// the result but never delete the original (it used to delete every scanned file).
     #[test]

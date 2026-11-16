@@ -325,23 +325,29 @@ impl FileHasher<'_> {
         let stream = &mut transform_output.out_stream;
         let buf_len = self.buf_len;
 
+        // The transformed output can be longer or shorter than the input file, so the whole
+        // output stream is hashed (up to EOF), not just `chunk.len` bytes of it. Stopping early
+        // would make files with a common output prefix look identical, and would leave the
+        // child blocked on a full pipe while we wait for it to exit.
+        let len = FileLen::MAX;
+
         // Transformed file may have a different length, so we cannot use stream_hash progress
         // reporting, as it would report progress of the transformed stream. Instead we advance
         // progress after doing the full file.
         let hash = match self.algorithm {
-            HashFn::Metro => stream_hash::<MetroHash128>(stream, chunk.len, buf_len, |_| {}),
+            HashFn::Metro => stream_hash::<MetroHash128>(stream, len, buf_len, |_| {}),
             #[cfg(feature = "xxhash")]
-            HashFn::Xxhash => stream_hash::<Xxh3>(stream, chunk.len, buf_len, |_| {}),
+            HashFn::Xxhash => stream_hash::<Xxh3>(stream, len, buf_len, |_| {}),
             #[cfg(feature = "blake3")]
-            HashFn::Blake3 => stream_hash::<blake3::Hasher>(stream, chunk.len, buf_len, |_| {}),
+            HashFn::Blake3 => stream_hash::<blake3::Hasher>(stream, len, buf_len, |_| {}),
             #[cfg(feature = "sha2")]
-            HashFn::Sha256 => stream_hash::<Sha256>(stream, chunk.len, buf_len, |_| {}),
+            HashFn::Sha256 => stream_hash::<Sha256>(stream, len, buf_len, |_| {}),
             #[cfg(feature = "sha2")]
-            HashFn::Sha512 => stream_hash::<Sha512>(stream, chunk.len, buf_len, |_| {}),
+            HashFn::Sha512 => stream_hash::<Sha512>(stream, len, buf_len, |_| {}),
             #[cfg(feature = "sha3")]
-            HashFn::Sha3_256 => stream_hash::<Sha3_256>(stream, chunk.len, buf_len, |_| {}),
+            HashFn::Sha3_256 => stream_hash::<Sha3_256>(stream, len, buf_len, |_| {}),
             #[cfg(feature = "sha3")]
-            HashFn::Sha3_512 => stream_hash::<Sha3_512>(stream, chunk.len, buf_len, |_| {}),
+            HashFn::Sha3_512 => stream_hash::<Sha3_512>(stream, len, buf_len, |_| {}),
         };
         progress(chunk.len.0 as usize);
 
