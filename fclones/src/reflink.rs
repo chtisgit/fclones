@@ -582,15 +582,20 @@ pub mod test {
         // Probe on the same filesystem the tests use (`with_dir` creates directories under
         // target/test), and count only an actual success as support: any error means the
         // FIDEDUPERANGE tests below cannot be meaningful here.
-        with_dir("dedupe/fideduperange_probe", |root| {
-            let source_path = root.join("source_test");
-            let dest_path = root.join("dest_test");
+        // The result is computed once: tests run in parallel and must not race on the
+        // probe directory.
+        static SUPPORTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *SUPPORTED.get_or_init(|| {
+            with_dir("dedupe/fideduperange_probe", |root| {
+                let source_path = root.join("source_test");
+                let dest_path = root.join("dest_test");
 
-            // Create identical files
-            write_file(&source_path, "test content");
-            write_file(&dest_path, "test content");
+                // Create identical files
+                write_file(&source_path, "test content");
+                write_file(&dest_path, "test content");
 
-            reflink_overwrite_dedupe(&source_path, &dest_path).is_ok()
+                reflink_overwrite_dedupe(&source_path, &dest_path).is_ok()
+            })
         })
     }
 
