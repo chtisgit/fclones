@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs::{create_dir_all, remove_dir_all, File, OpenOptions};
 use std::io;
 use std::io::Read;
@@ -132,8 +132,8 @@ impl Transform {
                 "IN" => *has_in.borrow_mut() = true,
                 _ => {}
             };
-            OsString::from(s)
-        });
+            OsString::from(format!("${s}"))
+        })?;
 
         let has_in = has_in.into_inner();
         let has_out = has_out.into_inner();
@@ -148,25 +148,26 @@ impl Transform {
             return Err(io::Error::other("$IN required with --in-place"));
         }
 
-        let program = parsed
-            .first()
-            .and_then(|p| PathBuf::from(p).file_name().map(|s| s.to_os_string()));
-        let program = match program {
-            Some(p) => p.into_string().unwrap(),
+        let program_path = match parsed.first() {
+            Some(p) => p,
             None => return Err(io::Error::other("Command cannot be empty")),
         };
+        let program = PathBuf::from(program_path)
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| program_path.to_string_lossy().to_string());
 
-        // Check if the program is runnable, fail fast if it is not.
-        match Command::new(&program).spawn() {
-            Ok(mut child) => {
-                let _ignore = child.kill();
-            }
-            Err(e) => {
-                return Err(io::Error::new(
-                    e.kind(),
-                    format!("Cannot launch {program}: {e}"),
-                ))
-            }
+        // Check that the program can be found, fail fast if it can't. The program is looked up
+        // the same way it will be launched (a path with a separator is used as given, a bare
+        // name is searched in PATH), but it is not executed here.
+        if find_executable(program_path).is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "Cannot launch {}: program not found or not executable",
+                    program_path.to_string_lossy()
+                ),
+            ));
         }
 
         Ok(Transform {
@@ -207,7 +208,7 @@ impl Transform {
 
     /// Processes the input file and returns its output and err as stream
     pub fn run(&self, input: &Path) -> io::Result<Execution> {
-        let (args, input_conf, output_conf) = self.make_args(input);
+        let (args, input_conf, output_conf) = self.make_args(input)?;
         let mut command = build_command(&args, &input_conf, &output_conf)?;
         let result = execute(&mut command, input_conf, output_conf)?;
         Ok(result)
@@ -215,7 +216,7 @@ impl Transform {
 
     /// Creates arguments, input and output configuration for processing given input path.
     /// The first element of the argument vector contains the program name.
-    fn make_args(&self, input: &Path) -> (Vec<OsString>, Input, Output) {
+    fn make_args(&self, input: &Path) -> io::Result<(Vec<OsString>, Input, Output)> {
         let input_conf = RefCell::<Input>::new(Input::StdIn(input.to_path_buf()));
         let output_conf = RefCell::<Output>::new(Output::StdOut);
 
@@ -235,8 +236,8 @@ impl Transform {
                 output_conf.replace(Output::Named(output.clone()));
                 output.into_os_string()
             }
-            _ => OsString::from(arg),
-        });
+            _ => OsString::from(format!("${arg}")),
+        })?;
 
         let input_conf = input_conf.into_inner();
         let mut output_conf = output_conf.into_inner();
@@ -245,7 +246,7 @@ impl Transform {
             output_conf = Output::InPlace(input_conf.input_path().clone())
         }
 
-        (args, input_conf, output_conf)
+        Ok((args, input_conf, output_conf))
     }
 }
 
@@ -271,6 +272,46 @@ impl Drop for Execution {
         while let Ok(1..) = self.out_stream.read(&mut buf) {}
         let _ = self.child.lock().unwrap().wait();
     }
+}
+
+/// Finds the executable that `Command::new(program)` would launch, without launching it:
+/// a path containing a directory separator is used as given, a bare name is searched in `PATH`
+/// (on Windows also with the extensions from `PATHEXT`).
+fn find_executable(program: &OsStr) -> Option<PathBuf> {
+    #[cfg(unix)]
+    fn is_executable(path: &std::path::Path) -> bool {
+        use std::os::unix::fs::PermissionsExt;
+        path.metadata()
+            .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    fn is_executable(path: &std::path::Path) -> bool {
+        path.is_file()
+    }
+    fn candidates(path: PathBuf) -> Vec<PathBuf> {
+        let mut result = vec![path.clone()];
+        if cfg!(windows) && path.extension().is_none() {
+            let exts = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
+            for ext in exts.split(';').filter(|e| !e.is_empty()) {
+                let mut p = path.clone().into_os_string();
+                p.push(ext);
+                result.push(PathBuf::from(p));
+            }
+        }
+        result
+    }
+
+    let path = std::path::Path::new(program);
+    if path.components().count() > 1 {
+        return candidates(path.to_path_buf())
+            .into_iter()
+            .find(|p| is_executable(p));
+    }
+    let paths = std::env::var_os("PATH")?;
+    std::env::split_paths(&paths)
+        .flat_map(|dir| candidates(dir.join(program)))
+        .find(|p| is_executable(p))
 }
 
 /// Builds the `Command` struct from the parsed arguments
@@ -397,7 +438,9 @@ where
 }
 
 /// Splits the command string into separate arguments and substitutes $params
-fn parse_command<F>(command: &str, substitute: F) -> Vec<OsString>
+/// Returns an error if the command cannot be parsed completely.
+/// A `$` that does not start a variable name is kept literally (e.g. `sed s/a$/b/`).
+fn parse_command<F>(command: &str, substitute: F) -> io::Result<Vec<OsString>>
 where
     F: Fn(&str) -> OsString,
 {
@@ -421,12 +464,22 @@ where
     let p_var = map(tuple((tag("$"), re_find(r_var))), |(_, str)| {
         (substitute)(str)
     });
-    let p_non_var = map(many1(none_of(" $")), join_chars);
-    let p_arg = map(many1(alt((p_var, p_non_var))), join_str);
+    let p_non_var = map(many1(none_of(" \t$")), join_chars);
+    let p_dollar = map(tag("$"), |_| OsString::from("$"));
+    let p_arg = map(many1(alt((p_var, p_non_var, p_dollar))), join_str);
     let p_whitespace = many1(one_of(" \t"));
     let p_args = |s| separated_list0(p_whitespace, p_arg)(s);
+    let command = command.trim_matches(|c| c == ' ' || c == '\t');
     let result: IResult<&str, Vec<OsString>> = (p_args)(command);
-    result.expect("Parse error").1
+    match result {
+        Ok(("", args)) => Ok(args),
+        Ok((rest, _)) => Err(io::Error::other(format!(
+            "Cannot parse command '{command}' at '{rest}'"
+        ))),
+        Err(e) => Err(io::Error::other(format!(
+            "Cannot parse command '{command}': {e}"
+        ))),
+    }
 }
 
 #[cfg(test)]
@@ -574,8 +627,42 @@ mod test {
 
     #[test]
     fn parse_command() {
-        let result = super::parse_command("foo bar", |s| OsString::from(s));
+        let result = super::parse_command("foo bar", |s| OsString::from(s)).unwrap();
         assert_eq!(result, vec![OsString::from("foo"), OsString::from("bar")])
+    }
+
+    /// A `$` that does not start a variable name used to end parsing silently, so
+    /// `sed -e s/one$/two/` ran as `sed -e s/one`. Unknown `$NAME`s lost their `$`.
+    #[test]
+    fn parse_command_keeps_literal_dollars() {
+        let keep = |s: &str| OsString::from(format!("${s}"));
+        assert_eq!(
+            super::parse_command("sed -e s/one$/two/", keep).unwrap(),
+            vec!["sed", "-e", "s/one$/two/"]
+        );
+        assert_eq!(
+            super::parse_command("  echo $HOME $ end  ", keep).unwrap(),
+            vec!["echo", "$HOME", "$", "end"]
+        );
+    }
+
+    /// The pre-flight check used only the file name of the program and executed it.
+    /// A program given by a path outside PATH must be accepted; a missing one rejected.
+    #[test]
+    #[cfg(unix)]
+    fn transform_accepts_program_path_outside_path() {
+        use std::os::unix::fs::PermissionsExt;
+        with_dir("target/test/transform/program_path/", |root| {
+            let script = root.join("my-transform");
+            std::fs::write(&script, "#!/bin/sh\ncat\n").unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let command = script.to_string_lossy().to_string();
+            assert!(Transform::new(command, false).is_ok());
+
+            let missing = root.join("missing").to_string_lossy().to_string();
+            assert!(Transform::new(missing, false).is_err());
+            assert!(Transform::new("no-such-program-fclones".to_string(), false).is_err());
+        })
     }
 
     #[test]
@@ -583,7 +670,8 @@ mod test {
         let result = super::parse_command("foo bar in=$IN", |s| match s {
             "IN" => OsString::from("/input"),
             _ => OsString::from(s),
-        });
+        })
+        .unwrap();
 
         assert_eq!(
             result,
