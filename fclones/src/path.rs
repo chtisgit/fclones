@@ -118,7 +118,7 @@ impl Path {
     /// if the path is directory (e.g. root dir or parent dir).
     pub fn file_name(&self) -> Option<OsString> {
         match self.component.as_bytes() {
-            b"/" => None,
+            ROOT_BYTES => None,
             b".." => None,
             b"." => None,
             _ => Some(c_to_os_str(self.component.as_c_str())),
@@ -130,7 +130,7 @@ impl Path {
     /// Doesn't allocate anything on the heap.
     pub fn file_name_cstr(&self) -> Option<&CStr> {
         match self.component.as_bytes() {
-            b"/" => None,
+            ROOT_BYTES => None,
             b".." => None,
             b"." => None,
             _ => Some(self.component.as_c_str()),
