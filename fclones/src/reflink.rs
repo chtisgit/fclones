@@ -209,8 +209,8 @@ fn reflink_overwrite(target: &std::path::Path, link: &std::path::Path) -> io::Re
 /// Returns the FIDEDUPERANGE ioctl request code, `_IOWR(0x94, 54, struct file_dedupe_range)`,
 /// where `sizeof(struct file_dedupe_range)` is 24 (the `info[]` array is a flexible member).
 #[cfg(any(target_os = "linux", target_os = "android"))]
-fn fideduperange_request_code() -> libc::c_ulong {
-    nix::request_code_readwrite!(0x94, 54, 24) as libc::c_ulong
+fn fideduperange_request_code() -> nix::sys::ioctl::ioctl_num_type {
+    nix::request_code_readwrite!(0x94, 54, 24) as nix::sys::ioctl::ioctl_num_type
 }
 
 /// New implementation using FIDEDUPERANGE for safer deduplication
@@ -266,7 +266,7 @@ fn reflink_overwrite_dedupe(target: &std::path::Path, link: &std::path::Path) ->
     const FIDEDUPERANGE_SIZE: usize = size_of::<FileDedupRange>() - size_of::<FileDedupRangeInfo>();
     debug_assert_eq!(
         request_code_readwrite!(FIDEDUPERANGE_TYPE, FIDEDUPERANGE_NR, FIDEDUPERANGE_SIZE)
-            as libc::c_ulong,
+            as nix::sys::ioctl::ioctl_num_type,
         fideduperange_request_code()
     );
 
@@ -298,7 +298,7 @@ fn reflink_overwrite_dedupe(target: &std::path::Path, link: &std::path::Path) ->
             libc::ioctl(
                 src.as_raw_fd(),
                 request_code_readwrite!(FIDEDUPERANGE_TYPE, FIDEDUPERANGE_NR, FIDEDUPERANGE_SIZE)
-                    as libc::c_ulong,
+                    as nix::sys::ioctl::ioctl_num_type,
                 &mut dedupe_range,
             )
         };
@@ -817,7 +817,7 @@ pub mod test {
         any(target_arch = "x86_64", target_arch = "aarch64")
     ))]
     fn test_fideduperange_request_code_matches_kernel_header() {
-        assert_eq!(fideduperange_request_code(), 0xc018_9436);
+        assert_eq!(fideduperange_request_code() as u32, 0xc018_9436);
     }
 
     /// On a filesystem that supports FICLONE but not FIDEDUPERANGE (e.g. ZFS, where the
