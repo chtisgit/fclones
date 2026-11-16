@@ -354,7 +354,8 @@ impl<'a> Walk<'a> {
         F: Fn(Path) + Sync + Send,
         's: 'w,
     {
-        if level > self.depth {
+        // `depth` is the number of directory levels to read: 1 reads only the input directories.
+        if level >= self.depth {
             return;
         }
         if !self.path_selector.matches_dir(&path) {
@@ -479,7 +480,7 @@ impl Default for Walk<'_> {
 
 #[cfg(test)]
 mod test {
-    use std::fs::{create_dir, File};
+    use std::fs::{create_dir, create_dir_all, File};
     use std::path::PathBuf;
     use std::sync::Mutex;
 
@@ -496,6 +497,33 @@ mod test {
             File::create(&file2).unwrap();
             let walk = Walk::new();
             assert_eq!(run_walk(walk, test_root.clone()), vec![file1, file2]);
+        });
+    }
+
+    /// `--depth 1` "descends into directories specified explicitly as input paths, but does not
+    /// descend into subdirectories". It used to read one level more than that.
+    #[test]
+    fn depth_limits_recursion() {
+        with_dir("target/test/walk/depth/", |test_root| {
+            let sub = test_root.join("sub");
+            let deeper = sub.join("deeper");
+            create_dir_all(&deeper).unwrap();
+            let files = [
+                test_root.join("a"),
+                sub.join("b"),
+                deeper.join("c"),
+            ];
+            for f in &files {
+                File::create(f).unwrap();
+            }
+            let walk_with_depth = |depth| {
+                let mut walk = Walk::new();
+                walk.depth = depth;
+                run_walk(walk, test_root.clone())
+            };
+            assert_eq!(walk_with_depth(1), files[..1].to_vec());
+            assert_eq!(walk_with_depth(2), files[..2].to_vec());
+            assert_eq!(walk_with_depth(usize::MAX), files.to_vec());
         });
     }
 
