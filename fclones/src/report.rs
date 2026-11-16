@@ -351,6 +351,13 @@ pub trait ReportReader {
     fn read_groups(self: Box<Self>) -> io::Result<Box<GroupIterator>>;
 }
 
+/// Removes the line terminator (`\n` or `\r\n`) from a line read with `read_line`.
+/// Unlike `trim`, this keeps any other whitespace, which may be part of a file name.
+fn strip_line_terminator(line: &str) -> &str {
+    let line = line.strip_suffix('\n').unwrap_or(line);
+    line.strip_suffix('\r').unwrap_or(line)
+}
+
 /// Iterates the contents of the report.
 /// Each emitted item is a group of duplicate files.
 pub struct TextReportIterator<R: BufRead> {
@@ -431,13 +438,16 @@ where
                     "Unexpected end of file.",
                 ));
             }
-            if !path_str.starts_with("    ") || path_str.trim().is_empty() {
+            // Only strip the 4-space indent and the line terminator: file names may begin or end
+            // with whitespace (spaces are not escaped), so trimming would change the path.
+            let path_part = path_str.strip_prefix("    ").map(strip_line_terminator);
+            if path_part.map_or(true, |p| p.trim().is_empty()) {
                 return Err(Error::new(
                     ErrorKind::InvalidData,
                     format!("Path expected: {path_str}"),
                 ));
             }
-            let path = Path::from_escaped_string(path_str.trim()).map_err(|e| {
+            let path = Path::from_escaped_string(path_part.unwrap()).map_err(|e| {
                 Error::new(
                     ErrorKind::InvalidData,
                     format!("Invalid path {path_str}: {e}"),
@@ -587,8 +597,18 @@ impl<R: BufRead + Send + 'static> ReportReader for TextReportReader<R> {
                 format!("Malformed header: Failed to parse command arguments: {e}"),
             )
         })?;
-        let base_dir = self.read_extract(&BASE_DIR_RE, "base dir")?.swap_remove(0);
-        let base_dir = Path::from(base_dir);
+        // The base dir is written escaped (like the paths) and may end with whitespace,
+        // so the line must not be trimmed and the value must be unescaped.
+        let line = self.read_line()?;
+        let base_dir = BASE_DIR_RE
+            .captures(strip_line_terminator(&line))
+            .and_then(|c| c.get(1))
+            .map(|m| m.as_str().to_owned())
+            .ok_or_else(|| {
+                Error::new(ErrorKind::InvalidData, "Malformed header: Missing base dir")
+            })?;
+        let base_dir =
+            Path::from_escaped_string(&base_dir).unwrap_or_else(|_| Path::from(base_dir));
 
         // The "Scanned:" line was added after the original header format, so reports written
         // by older versions go straight from "Base dir:" to "Total:". Treat it as optional:
@@ -795,6 +815,41 @@ mod test {
         ];
 
         roundtrip_groups_text(&header, groups);
+    }
+
+    #[test]
+    fn test_text_report_reader_keeps_leading_and_trailing_whitespace_in_names() {
+        // Spaces are not escaped in the text report, so the reader must not trim them away:
+        // "a " read back as "a" can make `fclones remove` delete a different file.
+        // U+2003 (Em Space) is Unicode whitespace that `str::trim` strips (upstream issue #275).
+        let header = dummy_report_header();
+        let groups = vec![FileGroup {
+            file_len: FileLen(100),
+            file_hash: FileHash::from(0x00112233445566778899aabbccddeeff),
+            files: vec![
+                Path::from("/dir/a "),
+                Path::from("/dir/ b"),
+                Path::from("/dir/c\u{2003}"),
+                Path::from("/dir/d\t"),
+            ],
+        }];
+        roundtrip_groups_text(&header, groups);
+    }
+
+    #[test]
+    fn test_text_report_reader_reads_escaped_base_dir() {
+        let mut header1 = dummy_report_header();
+        header1.base_dir = Path::from("/tmp/back\\slash dir ");
+        let groups: Vec<FileGroup<Path>> = vec![];
+
+        let output = NamedTempFile::new().unwrap();
+        let input = output.reopen().unwrap();
+        let mut writer = ReportWriter::new(output, false);
+        writer.write_as_text(&header1, groups).unwrap();
+
+        let mut reader = TextReportReader::new(BufReader::new(input));
+        let header2 = reader.read_header().unwrap();
+        assert_eq!(header2.base_dir, header1.base_dir);
     }
 
     #[test]
