@@ -6,7 +6,9 @@ use std::ops::Index;
 use itertools::Itertools;
 use lazy_init::Lazy;
 use rayon::{ThreadPool, ThreadPoolBuilder};
-use sysinfo::{DiskExt, DiskKind, System, SystemExt};
+use sysinfo::DiskKind;
+#[cfg(not(target_os = "linux"))]
+use sysinfo::{DiskExt, System, SystemExt};
 
 use crate::config::Parallelism;
 use crate::file::FileLen;
@@ -121,6 +123,167 @@ impl DiskDevice {
     }
 }
 
+/// A mounted file system as found on the system.
+struct DiskInfo {
+    name: OsString,
+    kind: DiskKind,
+    file_system: String,
+    mount_point: std::path::PathBuf,
+    removable: bool,
+}
+
+#[cfg(not(target_os = "linux"))]
+fn list_disks() -> Vec<DiskInfo> {
+    let mut sys = System::new();
+    sys.refresh_disks_list();
+    sys.disks()
+        .iter()
+        .map(|d| DiskInfo {
+            name: d.name().to_os_string(),
+            kind: d.kind(),
+            file_system: String::from_utf8_lossy(d.file_system()).to_string(),
+            mount_point: d.mount_point().to_path_buf(),
+            removable: d.is_removable(),
+        })
+        .collect()
+}
+
+/// On Linux the mounts are read from /proc/mounts directly instead of through sysinfo:
+/// sysinfo (0.29) calls statvfs() on every mount point, including autofs/systemd-automount
+/// trigger points, which mounts them, or hangs when the target is unreachable - before fclones
+/// even starts scanning. fclones only needs the mount table and the disk type, so no file system
+/// is touched here.
+#[cfg(target_os = "linux")]
+fn list_disks() -> Vec<DiskInfo> {
+    let mounts = std::fs::read_to_string("/proc/mounts").unwrap_or_default();
+    let removable = linux::removable_devices();
+    linux::parse_mounts(&mounts)
+        .into_iter()
+        .map(|(spec, mount_point, fs_type)| DiskInfo {
+            kind: linux::disk_kind(OsStr::new(&spec)),
+            removable: removable.iter().any(|r| r.as_os_str() == OsStr::new(&spec)),
+            name: OsString::from(spec),
+            file_system: fs_type,
+            mount_point: std::path::PathBuf::from(mount_point),
+        })
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+mod linux {
+    //! Mount table parsing and disk type detection, following sysinfo 0.29 (MIT license,
+    //! https://github.com/GuillaumeGomez/sysinfo), but without calling statvfs().
+
+    use std::ffi::OsStr;
+    use std::fs;
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::{Path, PathBuf};
+
+    use sysinfo::DiskKind;
+
+    /// Parses /proc/mounts into (device, mount point, file system type), skipping pseudo
+    /// file systems, network file systems and autofs trigger points.
+    pub fn parse_mounts(content: &str) -> Vec<(String, String, String)> {
+        let unescape = |s: &str| {
+            s.replace("\\134", "\\")
+                .replace("\\040", " ")
+                .replace("\\011", "\t")
+                .replace("\\012", "\n")
+        };
+        content
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.split_whitespace();
+                let spec = unescape(fields.next()?);
+                let file = unescape(fields.next()?);
+                let fs_type = fields.next()?.to_string();
+                Some((spec, file, fs_type))
+            })
+            .filter(|(spec, file, fs_type)| {
+                let ignored_fs = matches!(
+                    fs_type.as_str(),
+                    "rootfs"
+                        | "sysfs"
+                        | "proc"
+                        | "tmpfs"
+                        | "devtmpfs"
+                        | "cgroup"
+                        | "cgroup2"
+                        | "pstore"
+                        | "squashfs"
+                        | "rpc_pipefs"
+                        | "iso9660"
+                        | "nfs4"
+                        | "nfs"
+                        // automount trigger points: touching them mounts the target
+                        | "autofs"
+                );
+                !(ignored_fs
+                    || file.starts_with("/sys")
+                    || file.starts_with("/proc")
+                    || (file.starts_with("/run") && !file.starts_with("/run/media"))
+                    || spec.starts_with("sunrpc"))
+            })
+            .collect()
+    }
+
+    /// Devices with a "usb-" link in /dev/disk/by-id.
+    pub fn removable_devices() -> Vec<PathBuf> {
+        match fs::read_dir("/dev/disk/by-id/") {
+            Ok(r) => r
+                .filter_map(|e| Some(e.ok()?.path()))
+                .filter(|p| {
+                    p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with("usb-"))
+                })
+                .filter_map(|p| p.canonicalize().ok())
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Determines whether the device is rotational, from /sys/block/<disk>/queue/rotational.
+    pub fn disk_kind(device_name: &OsStr) -> DiskKind {
+        let device_name_path = device_name.to_str().unwrap_or_default();
+        let real_path =
+            fs::canonicalize(device_name).unwrap_or_else(|_| PathBuf::from(device_name));
+        let mut real_path = real_path.to_str().unwrap_or_default();
+        if device_name_path.starts_with("/dev/mapper/") || device_name_path.starts_with("/dev/root")
+        {
+            if real_path != device_name_path {
+                return disk_kind(OsStr::new(&real_path));
+            }
+        } else if device_name_path.starts_with("/dev/sd") || device_name_path.starts_with("/dev/vd")
+        {
+            real_path = real_path.trim_start_matches("/dev/");
+            real_path = real_path.trim_end_matches(|c: char| c.is_ascii_digit());
+        } else if device_name_path.starts_with("/dev/nvme")
+            || device_name_path.starts_with("/dev/mmcblk")
+        {
+            real_path = match real_path.find('p') {
+                Some(idx) => &real_path["/dev/".len()..idx],
+                None => &real_path["/dev/".len()..],
+            };
+        } else {
+            real_path = real_path.trim_start_matches("/dev/");
+        }
+        let path = Path::new("/sys/block/")
+            .join(OsStr::from_bytes(real_path.as_bytes()))
+            .join("queue/rotational");
+        match fs::read_to_string(path)
+            .unwrap_or_default()
+            .trim()
+            .parse::<isize>()
+        {
+            Ok(1) => DiskKind::HDD,
+            Ok(0) => DiskKind::SSD,
+            Ok(x) => DiskKind::Unknown(x),
+            Err(_) => DiskKind::Unknown(-1),
+        }
+    }
+}
+
 /// Finds disk devices by file paths
 pub struct DiskDevices {
     devices: Vec<DiskDevice>,
@@ -231,8 +394,6 @@ impl DiskDevices {
     /// Reads the list of partitions and disks from the system and builds the `DiskDevices`
     /// structure from that information.
     pub fn new(pool_sizes: &HashMap<OsString, Parallelism>) -> DiskDevices {
-        let mut sys = System::new();
-        sys.refresh_disks_list();
         let mut result = DiskDevices {
             devices: Vec::new(),
             mount_points: Vec::new(),
@@ -246,13 +407,13 @@ impl DiskDevices {
             String::from("unknown"),
             pool_sizes,
         );
-        for d in sys.disks() {
-            let device_name = Self::physical_device_name(d.name());
+        for d in list_disks() {
+            let device_name = Self::physical_device_name(&d.name);
             let index = result.add_device(
                 device_name,
-                d.kind(),
-                d.is_removable(),
-                String::from_utf8_lossy(d.file_system()).to_string(),
+                d.kind,
+                d.removable,
+                d.file_system.clone(),
                 pool_sizes,
             );
 
@@ -262,14 +423,14 @@ impl DiskDevices {
             // https://www.swiftforensics.com/2019/10/macos-1015-volumes-firmlink-magic.html
             // https://eclecticlight.co/2020/01/23/catalina-boot-volumes/
             if cfg!(target_os = "macos")
-                && d.file_system() == b"apfs"
-                && d.mount_point().to_str() == Some("/System/Volumes/Data")
+                && d.file_system == "apfs"
+                && d.mount_point.to_str() == Some("/System/Volumes/Data")
             {
                 result.mount_points.push((Path::from("/"), index));
             } else {
                 result
                     .mount_points
-                    .push((Path::from(d.mount_point()), index));
+                    .push((Path::from(&d.mount_point), index));
             };
         }
         result
@@ -347,6 +508,47 @@ impl Index<usize> for DiskDevices {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    /// autofs / systemd-automount trigger points must not be listed (and so never touched):
+    /// sysinfo called statvfs() on them, which mounts or hangs (upstream issues #323, #337).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn mounts_skip_autofs_and_pseudo_file_systems() {
+        let mounts = "/dev/sda1 / ext4 rw 0 0\n\
+            systemd-1 /mnt/usb autofs rw,fd=67 0 0\n\
+            /dev/sdb1 /mnt/usb ext4 rw 0 0\n\
+            server:/export /srv/nfs nfs4 rw 0 0\n\
+            proc /proc proc rw 0 0\n\
+            /dev/sdc1 /media/My\\040Disk vfat rw 0 0\n";
+        let parsed = linux::parse_mounts(mounts);
+        let mount_points: Vec<&str> = parsed.iter().map(|(_, m, _)| m.as_str()).collect();
+        assert_eq!(mount_points, vec!["/", "/mnt/usb", "/media/My Disk"]);
+        assert_eq!(parsed[1].0, "/dev/sdb1"); // the real mount, not the autofs trigger
+    }
+
+    /// The own mount table must contain every disk sysinfo reports, with the same device name,
+    /// disk type and file system (sysinfo additionally drops file systems of size 0).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn own_disk_list_matches_sysinfo() {
+        use sysinfo::{DiskExt, System, SystemExt};
+        let mut sys = System::new();
+        sys.refresh_disks_list();
+        let ours = list_disks();
+        for d in sys.disks() {
+            let found = ours.iter().find(|o| o.mount_point == d.mount_point());
+            let o = found.unwrap_or_else(|| panic!("missing {:?}", d.mount_point()));
+            assert_eq!(o.name, d.name(), "{:?}", d.mount_point());
+            assert_eq!(o.kind, d.kind(), "{:?}", d.mount_point());
+            assert_eq!(
+                o.file_system.as_bytes(),
+                d.file_system(),
+                "{:?}",
+                d.mount_point()
+            );
+            assert_eq!(o.removable, d.is_removable(), "{:?}", d.mount_point());
+        }
+    }
 
     /// `--threads removable:N` was accepted but never used.
     #[test]
